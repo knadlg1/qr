@@ -85,6 +85,160 @@
     document.getElementById('auth-wrap').style.display = 'flex';
   };
 
+  async function enterDashboard() {
+    document.getElementById('auth-wrap').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'flex';
+    startRosterListener();
+    await resumeIfInProgress();
+  }
+
+  // ── 회원가입 (휴대폰 인증) ──
+  let otpTimer = null;
+  let otpSecondsLeft = 0;
+  let signupPending = null; // 가입 성공 후 로그인 대기중인 { email, password, academyId }
+
+  window.showSignup = function () {
+    document.getElementById('auth-wrap').querySelector('.auth-card').style.display = 'none';
+    document.getElementById('signup-card').style.display = 'block';
+  };
+
+  window.showLoginFromSignup = function () {
+    document.getElementById('signup-card').style.display = 'none';
+    document.getElementById('auth-wrap').querySelector('.auth-card').style.display = 'block';
+  };
+
+  window.requestSignupOtp = async function () {
+    const phone = document.getElementById('signup-phone').value.replace(/\D/g, '');
+    const errEl = document.getElementById('signup-error');
+    const btn = document.getElementById('btn-signup-request-otp');
+    errEl.style.display = 'none';
+    if (!phone) {
+      errEl.textContent = '휴대폰번호를 입력해주세요.';
+      errEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${FUNC_URL}/requestOTP`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || '인증번호 발송 실패');
+      document.getElementById('signup-otp-row').style.display = 'block';
+      startOtpCountdown();
+      // 발송 성공 후에도 비활성 유지(연타로 SMS 중복 발송 방지). 재발송은 아래 카운트다운 버튼으로.
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.style.display = 'block';
+      btn.disabled = false;
+    }
+  };
+
+  function startOtpCountdown() {
+    if (otpTimer) clearInterval(otpTimer);
+    otpSecondsLeft = 180;
+    updateOtpCountdownLabel();
+    document.getElementById('btn-signup-resend').disabled = true;
+    otpTimer = setInterval(() => {
+      otpSecondsLeft--;
+      updateOtpCountdownLabel();
+      if (otpSecondsLeft <= 0) {
+        clearInterval(otpTimer);
+        otpTimer = null;
+        document.getElementById('btn-signup-resend').disabled = false;
+      }
+    }, 1000);
+  }
+
+  function updateOtpCountdownLabel() {
+    const secs = Math.max(otpSecondsLeft, 0);
+    const m = String(Math.floor(secs / 60)).padStart(2, '0');
+    const s = String(secs % 60).padStart(2, '0');
+    document.getElementById('signup-otp-countdown').textContent = `${m}:${s}`;
+  }
+
+  window.verifySignupOtp = async function () {
+    const phone = document.getElementById('signup-phone').value.replace(/\D/g, '');
+    const code = document.getElementById('signup-otp-code').value.trim();
+    const errEl = document.getElementById('signup-error');
+    errEl.style.display = 'none';
+    if (!code) {
+      errEl.textContent = '인증번호를 입력해주세요.';
+      errEl.style.display = 'block';
+      return;
+    }
+    try {
+      const res = await fetch(`${FUNC_URL}/verifyOTP`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, code })
+      });
+      const data = await res.json();
+      if (!data.success || !data.verified) throw new Error(data.message || '인증번호가 일치하지 않습니다.');
+      if (otpTimer) { clearInterval(otpTimer); otpTimer = null; }
+      document.getElementById('signup-phone').disabled = true;
+      document.getElementById('signup-step1').style.display = 'none';
+      document.getElementById('signup-step2').style.display = 'block';
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.style.display = 'block';
+    }
+  };
+
+  window.submitSignup = async function () {
+    const phone = document.getElementById('signup-phone').value.replace(/\D/g, '');
+    const name = document.getElementById('signup-name').value.trim();
+    const email = document.getElementById('signup-email').value.trim();
+    const password = document.getElementById('signup-pw').value;
+    const academyName = document.getElementById('signup-academy').value.trim();
+    const errEl = document.getElementById('signup-error');
+    const btn = document.getElementById('btn-submit-signup');
+    errEl.style.display = 'none';
+    if (!name || !email || !password || !academyName) {
+      errEl.textContent = '모든 항목을 입력해주세요.';
+      errEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${FUNC_URL}/qrAdminSelfSignup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, name, email, password, academyName })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || '가입 실패');
+      signupPending = { email, password, academyId: data.academyId };
+      document.getElementById('signup-invite-code').textContent = data.inviteCode;
+      document.getElementById('signup-invite-modal').style.display = 'flex';
+    } catch (e) {
+      errEl.textContent = '가입 실패: ' + e.message;
+      errEl.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  window.closeSignupInviteModal = async function () {
+    document.getElementById('signup-invite-modal').style.display = 'none';
+    if (!signupPending) return;
+    const { email, password, academyId } = signupPending;
+    signupPending = null;
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      ACADEMY_ID = academyId;
+      await enterDashboard();
+    } catch (e) {
+      document.getElementById('signup-card').style.display = 'none';
+      document.getElementById('auth-wrap').querySelector('.auth-card').style.display = 'block';
+      const errEl = document.getElementById('login-error');
+      errEl.textContent = '계정은 생성되었습니다. 로그인 화면에서 이메일/비밀번호로 다시 로그인해주세요.';
+      errEl.style.display = 'block';
+    }
+  };
+
   // ── 탭 전환 ──
   window.showTab = function (tab) {
     document.getElementById('tab-qr').classList.toggle('active', tab === 'qr');
@@ -351,6 +505,11 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .auth-btn-primary{background:var(--brand);color:#fff;margin-bottom:10px;}
 .auth-btn-primary:hover{background:var(--brand-dark);}
 .auth-error{background:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:14px;display:none;}
+.auth-divider{display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--muted);font-size:12px;}
+.auth-divider::before,.auth-divider::after{content:'';flex:1;height:1px;background:var(--border);}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;padding:24px;z-index:1000;}
+.modal-card{max-width:360px;text-align:center;}
+.invite-code-box{font-size:28px;font-weight:800;color:var(--brand);letter-spacing:0.05em;background:var(--brand-xlight);border-radius:12px;padding:20px;margin:20px 0;}
 
 /* ── TOP BAR ── */
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
@@ -408,6 +567,60 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     <label class="auth-form-label">비밀번호</label>
     <input class="auth-input" id="login-pw" type="password" placeholder="비밀번호 입력" onkeydown="if(event.key==='Enter')doLogin()">
     <button class="auth-btn auth-btn-primary" onclick="doLogin()">로그인</button>
+    <div style="text-align:center;margin-top:6px;">
+      <a href="javascript:void(0)" onclick="showSignup()" style="color:var(--brand);font-size:13px;text-decoration:none;font-weight:600;">계정이 없으신가요? 회원가입</a>
+    </div>
+  </div>
+  <div class="auth-card" id="signup-card" style="display:none;">
+    <div class="auth-logo">
+      <div class="auth-logo-mark">H</div>
+      <div class="auth-logo-title">회원가입</div>
+      <div class="auth-logo-sub">휴대폰 인증 후 가입 정보를 입력하세요</div>
+    </div>
+    <div class="auth-error" id="signup-error"></div>
+
+    <div id="signup-step1">
+      <label class="auth-form-label">휴대폰번호</label>
+      <input class="auth-input" id="signup-phone" type="tel" inputmode="numeric" placeholder="01012345678">
+      <button class="auth-btn auth-btn-primary" id="btn-signup-request-otp" onclick="requestSignupOtp()">인증번호 받기</button>
+
+      <div id="signup-otp-row" style="display:none;margin-top:14px;">
+        <label class="auth-form-label">인증번호</label>
+        <input class="auth-input" id="signup-otp-code" type="text" inputmode="numeric" placeholder="인증번호 입력">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+          <span id="signup-otp-countdown" style="font-size:13px;color:var(--muted);"></span>
+          <button id="btn-signup-resend" onclick="requestSignupOtp()" disabled style="margin-left:auto;background:transparent;border:1.5px solid var(--border);color:var(--muted);border-radius:var(--pill);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;">재발송</button>
+        </div>
+        <button class="auth-btn auth-btn-primary" onclick="verifySignupOtp()">확인</button>
+      </div>
+    </div>
+
+    <div id="signup-step2" style="display:none;">
+      <label class="auth-form-label">이름</label>
+      <input class="auth-input" id="signup-name" type="text" placeholder="담당자 이름">
+      <label class="auth-form-label">이메일</label>
+      <input class="auth-input" id="signup-email" type="email" placeholder="admin@example.com">
+      <label class="auth-form-label">비밀번호 (최소 6자)</label>
+      <input class="auth-input" id="signup-pw" type="password" placeholder="비밀번호 입력">
+      <label class="auth-form-label">학원명</label>
+      <input class="auth-input" id="signup-academy" type="text" placeholder="학원명 입력">
+      <button class="auth-btn auth-btn-primary" id="btn-submit-signup" onclick="submitSignup()">가입하기</button>
+    </div>
+
+    <div style="text-align:center;margin-top:6px;">
+      <a href="javascript:void(0)" onclick="showLoginFromSignup()" style="color:var(--muted);font-size:13px;text-decoration:none;">로그인으로 돌아가기</a>
+    </div>
+  </div>
+</div>
+
+<div id="signup-invite-modal" class="modal-overlay" style="display:none;">
+  <div class="auth-card modal-card">
+    <div class="auth-logo">
+      <div class="auth-logo-title">가입이 완료되었습니다</div>
+      <div class="auth-logo-sub">이 코드를 학생들에게 공유하세요</div>
+    </div>
+    <div class="invite-code-box" id="signup-invite-code"></div>
+    <button class="auth-btn auth-btn-primary" onclick="closeSignupInviteModal()">확인</button>
   </div>
 </div>
 
