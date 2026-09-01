@@ -10,13 +10,8 @@
   import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
   import { getFirestore, collection, doc, getDoc, query, where, orderBy, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 
-  // TODO: Firestore academies 컬렉션에 만든 이 학원 문서의 ID로 교체하세요
-  const ACADEMY_ID = 'REPLACE_ME';
-
-  if (ACADEMY_ID === 'REPLACE_ME') {
-    document.body.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:sans-serif;background:#f4f5f7;"><div style="background:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;border-radius:12px;padding:28px 36px;font-size:16px;font-weight:700;">ACADEMY_ID를 설정해주세요</div></div>';
-    throw new Error('ACADEMY_ID가 설정되지 않았습니다.');
-  }
+  // 로그인한 계정(uid)의 qrAdmins 문서에서 academyId를 조회해 채운다(doLogin 참고).
+  let ACADEMY_ID = null;
 
   const FUNC_URL = 'https://us-central1-my-attendance-8122d.cloudfunctions.net';
 
@@ -62,6 +57,14 @@
     errEl.style.display = 'none';
     try {
       await signInWithEmailAndPassword(auth, email, pw);
+      const adminSnap = await getDoc(doc(db, 'qrAdmins', auth.currentUser.uid));
+      if (!adminSnap.exists() || !adminSnap.data().academyId) {
+        errEl.textContent = '이 계정에 연결된 학원 정보를 찾을 수 없습니다. 슈퍼어드민에서 계정 설정을 확인해주세요.';
+        errEl.style.display = 'block';
+        await auth.signOut();
+        return;
+      }
+      ACADEMY_ID = adminSnap.data().academyId;
       document.getElementById('auth-wrap').style.display = 'none';
       document.getElementById('dashboard').style.display = 'flex';
       startRosterListener();
@@ -77,6 +80,7 @@
     if (rosterUnsub) rosterUnsub();
     if (checkinsUnsub) checkinsUnsub();
     await auth.signOut();
+    ACADEMY_ID = null;
     document.getElementById('dashboard').style.display = 'none';
     document.getElementById('auth-wrap').style.display = 'flex';
   };
