@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Here — QR 출석 관리</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
+  import { getFirestore, collection, doc, getDoc, query, where, orderBy, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
+
+  // TODO: Firestore academies 컬렉션에 만든 이 학원 문서의 ID로 교체하세요
+  const ACADEMY_ID = 'REPLACE_ME';
+
+  if (ACADEMY_ID === 'REPLACE_ME') {
+    document.body.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:sans-serif;background:#f4f5f7;"><div style="background:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;border-radius:12px;padding:28px 36px;font-size:16px;font-weight:700;">ACADEMY_ID를 설정해주세요</div></div>';
+    throw new Error('ACADEMY_ID가 설정되지 않았습니다.');
+  }
+
+  const FUNC_URL = 'https://us-central1-my-attendance-8122d.cloudfunctions.net';
+
+  const app = initializeApp({
+    apiKey:"AIzaSyBaCpQKykViq6526dCJ8mEYbUZqyg5-NUo",
+    authDomain:"my-attendance-8122d.firebaseapp.com",
+    projectId:"my-attendance-8122d",
+    storageBucket:"my-attendance-8122d.firebasestorage.app",
+    messagingSenderId:"994601190154",
+    appId:"1:994601190154:web:d702adbf20039f73ee70f3"
+  });
+  const db = getFirestore(app);
+  const auth = getAuth(app);
+
+  // ── 상태 ──
+  let currentPeriod = null;
+  let rotateInterval = null;
+  let countdownInterval = null;
+  let countdownSec = 5;
+  let rosterUnsub = null;
+  let checkinsUnsub = null;
+
+  function todayKST() {
+    return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  }
+
+  function sessionId() {
+    return `${ACADEMY_ID}_${todayKST()}`;
+  }
+
+  function clearRotateInterval() {
+    if (rotateInterval) { clearInterval(rotateInterval); rotateInterval = null; }
+    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+  }
+
+  window.addEventListener('beforeunload', clearRotateInterval);
+
+  // ── 로그인 ──
+  window.doLogin = async function () {
+    const email = document.getElementById('login-email').value.trim();
+    const pw = document.getElementById('login-pw').value;
+    const errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+    try {
+      await signInWithEmailAndPassword(auth, email, pw);
+      document.getElementById('auth-wrap').style.display = 'none';
+      document.getElementById('dashboard').style.display = 'flex';
+      startRosterListener();
+      await resumeIfInProgress();
+    } catch (e) {
+      errEl.textContent = '로그인 실패: 이메일 또는 비밀번호를 확인해주세요.';
+      errEl.style.display = 'block';
+    }
+  };
+
+  window.doLogout = async function () {
+    clearRotateInterval();
+    if (rosterUnsub) rosterUnsub();
+    if (checkinsUnsub) checkinsUnsub();
+    await auth.signOut();
+    document.getElementById('dashboard').style.display = 'none';
+    document.getElementById('auth-wrap').style.display = 'flex';
+  };
+
+  // ── 탭 전환 ──
+  window.showTab = function (tab) {
+    document.getElementById('tab-qr').classList.toggle('active', tab === 'qr');
+    document.getElementById('tab-history').classList.toggle('active', tab === 'history');
+    document.getElementById('page-qr').style.display = tab === 'qr' ? 'block' : 'none';
+    document.getElementById('page-history').style.display = tab === 'history' ? 'block' : 'none';
+    if (tab === 'history') loadHistoryList();
+  };
+
+  // ── 실시간 QR ──
+  async function authHeader() {
+    const token = await auth.currentUser.getIdToken();
+    return { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+  }
+
+  window.startNextPeriod = async function () {
+    const btn = document.getElementById('btn-start-period');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${FUNC_URL}/startQrPeriod`, {
+        method: 'POST',
+        headers: await authHeader(),
+        body: JSON.stringify({ academyId: ACADEMY_ID })
+      });
+      if (!res.ok) throw new Error('요청 실패');
+      const data = await res.json();
+      currentPeriod = data.period;
+      document.getElementById('current-period-label').textContent = `현재 ${data.period}교시`;
+      await drawQr(data.qrPayload);
+      resubscribeCheckins();
+      startRotateLoop();
+    } catch (e) {
+      alert('교시 시작에 실패했습니다: ' + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  async function resumeIfInProgress() {
+    try {
+      const sid = sessionId();
+      const snap = await getDoc(doc(db, 'qrSessions', sid));
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (!data.currentPeriod) return;
+      currentPeriod = data.currentPeriod;
+      document.getElementById('current-period-label').textContent = `현재 ${currentPeriod}교시`;
+      const res = await fetch(`${FUNC_URL}/rotateQrToken`, {
+        method: 'POST',
+        headers: await authHeader(),
+        body: JSON.stringify({ academyId: ACADEMY_ID })
+      });
+      if (!res.ok) return;
+      const rdata = await res.json();
+      if (!rdata.success) return;
+      await drawQr(rdata.qrPayload);
+      resubscribeCheckins();
+      startRotateLoop();
+    } catch (e) {
+      console.warn('이어받기 실패:', e);
+    }
+  }
+
+  function startRotateLoop() {
+    clearRotateInterval();
+    countdownSec = 5;
+    updateCountdownLabel();
+    countdownInterval = setInterval(() => {
+      countdownSec--;
+      if (countdownSec <= 0) countdownSec = 5;
+      updateCountdownLabel();
+    }, 1000);
+    rotateInterval = setInterval(rotateQr, 5000);
+  }
+
+  function updateCountdownLabel() {
+    document.getElementById('qr-countdown').textContent = `${countdownSec}초 후 갱신`;
+  }
+
+  async function rotateQr() {
+    try {
+      const res = await fetch(`${FUNC_URL}/rotateQrToken`, {
+        method: 'POST',
+        headers: await authHeader(),
+        body: JSON.stringify({ academyId: ACADEMY_ID })
+      });
+      if (!res.ok) throw new Error('갱신 실패');
+      const data = await res.json();
+      await drawQr(data.qrPayload);
+      countdownSec = 5;
+      updateCountdownLabel();
+    } catch (e) {
+      console.warn('QR 갱신 실패:', e);
+    }
+  }
+
+  async function drawQr(payload) {
+    const canvas = document.getElementById('qr-canvas');
+    await QRCode.toCanvas(canvas, payload, { width: 320, margin: 1 });
+  }
+
+  function startRosterListener() {
+    const sid = sessionId();
+    if (rosterUnsub) rosterUnsub();
+    rosterUnsub = onSnapshot(collection(db, 'qrSessions', sid, 'roster'), (snap) => {
+      lastRosterSize = snap.size;
+      document.getElementById('roster-count').textContent = `오늘 수강생 ${snap.size}명`;
+      renderCheckinLabel();
+    });
+  }
+
+  let lastRosterSize = 0;
+  let lastCheckinSize = 0;
+
+  function renderCheckinLabel() {
+    if (currentPeriod == null) {
+      document.getElementById('checkin-count').textContent = '이번 교시 체크 -';
+      return;
+    }
+    const absent = Math.max(lastRosterSize - lastCheckinSize, 0);
+    document.getElementById('checkin-count').textContent =
+      `이번 교시 체크 ${lastCheckinSize}명 / 미체크 ${absent}명`;
+  }
+
+  function resubscribeCheckins() {
+    if (checkinsUnsub) { checkinsUnsub(); checkinsUnsub = null; }
+    if (currentPeriod == null) return;
+    const sid = sessionId();
+    const q = query(collection(db, 'qrSessions', sid, 'checkins'), where('period', '==', currentPeriod));
+    checkinsUnsub = onSnapshot(q, (snap) => {
+      lastCheckinSize = snap.size;
+      renderCheckinLabel();
+    });
+  }
+
+  // ── 지난 기록 ──
+  window.loadHistoryList = async function () {
+    const listEl = document.getElementById('history-list');
+    listEl.innerHTML = '<div class="hist-empty">불러오는 중...</div>';
+    try {
+      const q = query(
+        collection(db, 'qrSessions'),
+        where('academyId', '==', ACADEMY_ID),
+        orderBy('date', 'desc')
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        listEl.innerHTML = '<div class="hist-empty">기록이 없습니다.</div>';
+        return;
+      }
+      listEl.innerHTML = '';
+      snap.forEach((d) => {
+        const data = d.data();
+        const item = document.createElement('button');
+        item.className = 'hist-item';
+        item.textContent = data.date || d.id;
+        item.onclick = () => loadSessionDetail(d.id, data);
+        listEl.appendChild(item);
+      });
+    } catch (e) {
+      listEl.innerHTML = '<div class="hist-empty">불러오기 실패: ' + e.message + '</div>';
+    }
+  };
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  async function loadSessionDetail(sid, sessionData) {
+    const detailEl = document.getElementById('history-detail');
+    detailEl.innerHTML = '<div class="hist-empty">불러오는 중...</div>';
+    const periodsRun = sessionData.periodsRun || [];
+
+    const rosterSnap = await getDocs(collection(db, 'qrSessions', sid, 'roster'));
+    const checkinsSnap = await getDocs(collection(db, 'qrSessions', sid, 'checkins'));
+
+    const students = [];
+    rosterSnap.forEach((d) => students.push({ id: d.id, ...d.data() }));
+
+    const checkinMap = {}; // studentId -> { period: time }
+    checkinsSnap.forEach((d) => {
+      const c = d.data();
+      const sid2 = c.kakaoId;
+      if (!checkinMap[sid2]) checkinMap[sid2] = {};
+      let timeStr = '';
+      if (c.checkedAt && c.checkedAt.toDate) {
+        timeStr = c.checkedAt.toDate().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      } else if (c.checkedAt) {
+        timeStr = String(c.checkedAt);
+      }
+      checkinMap[sid2][c.period] = timeStr;
+    });
+
+    let html = '<table class="hist-table"><thead><tr><th>학생</th>';
+    periodsRun.forEach((p) => { html += `<th>${p}교시</th>`; });
+    html += '</tr></thead><tbody>';
+    students.forEach((s) => {
+      html += `<tr><td>${escapeHtml(s.name || s.id)}</td>`;
+      periodsRun.forEach((p) => {
+        const t = (checkinMap[s.id] && checkinMap[s.id][p]) || null;
+        html += `<td>${t ? t : '<span class="absent">결석</span>'}</td>`;
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    detailEl.innerHTML = html;
+    document.getElementById('btn-csv').style.display = students.length ? 'inline-block' : 'none';
+  }
+
+  window.downloadCsv = function () {
+    const table = document.querySelector('#history-detail .hist-table');
+    if (!table) return;
+    const rows = [];
+    rows.push(Array.from(table.querySelectorAll('thead th')).map((th) => th.textContent));
+    table.querySelectorAll('tbody tr').forEach((tr) => {
+      rows.push(Array.from(tr.children).map((td) => td.textContent.trim()));
+    });
+    const csvSafe = (v) => {
+      let s = String(v);
+      if (/^[=+\-@]/.test(s)) s = "'" + s;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+    const csv = rows.map((r) => r.map(csvSafe).join(',')).join('\r\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'attendance.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --brand: #6c63ff;
+  --brand-dark: #5651d5;
+  --brand-xlight: #ede9fe;
+  --canvas: #f4f5f7;
+  --surface: #FFFFFF;
+  --border: #E5E7EB;
+  --text: #111827;
+  --muted: #6B7280;
+  --radius: 10px;
+  --pill: 50px;
+  --shadow: 0 1px 4px rgba(0,0,0,.08), 0 0 0 1px rgba(0,0,0,.04);
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);color:var(--text);letter-spacing:-0.01em;min-height:100vh;}
+
+/* ── AUTH (admin.html 재사용) ── */
+.auth-wrap{min-height:100vh;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);display:flex;align-items:center;justify-content:center;padding:24px;}
+.auth-card{background:var(--surface);border-radius:20px;padding:40px 36px;width:100%;max-width:400px;box-shadow:0 24px 64px rgba(0,0,0,0.3);}
+.auth-logo{text-align:center;margin-bottom:28px;}
+.auth-logo-mark{width:64px;height:64px;background:var(--brand);border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:800;color:#fff;margin:0 auto 14px;}
+.auth-logo-title{font-size:22px;font-weight:800;color:var(--text);margin-top:8px;letter-spacing:-0.02em;}
+.auth-logo-sub{font-size:13px;color:var(--muted);margin-top:4px;}
+.auth-form-label{font-size:11px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px;letter-spacing:0.06em;text-transform:uppercase;}
+.auth-input{width:100%;padding:13px 16px;border:1.5px solid var(--border);border-radius:10px;font-size:15px;color:var(--text);outline:none;margin-bottom:14px;background:#fff;transition:border-color .15s;}
+.auth-input:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(108,99,255,.12);}
+.auth-btn{width:100%;padding:15px;border-radius:var(--pill);border:none;font-size:15px;font-weight:700;cursor:pointer;transition:all 0.2s;letter-spacing:-0.01em;}
+.auth-btn:active{transform:scale(0.97);}
+.auth-btn-primary{background:var(--brand);color:#fff;margin-bottom:10px;}
+.auth-btn-primary:hover{background:var(--brand-dark);}
+.auth-error{background:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:14px;display:none;}
+
+/* ── TOP BAR ── */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+.topbar-title{font-size:18px;font-weight:800;color:var(--brand);letter-spacing:-0.02em;}
+.tabs{display:flex;gap:6px;}
+.tab-btn{padding:9px 18px;border-radius:var(--pill);border:1.5px solid var(--border);background:transparent;color:var(--muted);font-size:14px;font-weight:700;cursor:pointer;transition:.15s;}
+.tab-btn:hover{border-color:var(--brand);color:var(--brand);}
+.tab-btn.active{background:var(--brand);border-color:var(--brand);color:#fff;}
+.btn-logout{background:transparent;border:1.5px solid var(--border);color:var(--muted);padding:8px 16px;border-radius:var(--pill);cursor:pointer;font-size:13px;font-weight:600;transition:.15s;}
+.btn-logout:hover{border-color:var(--brand);color:var(--brand);}
+
+#dashboard{display:none;flex-direction:column;min-height:100vh;}
+.page{padding:32px;}
+
+/* ── QR PAGE ── */
+.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:18px;}
+.qr-card{background:var(--surface);border-radius:20px;padding:36px;box-shadow:var(--shadow);display:flex;flex-direction:column;align-items:center;gap:16px;}
+#qr-canvas{border-radius:12px;}
+.qr-countdown{font-size:15px;font-weight:700;color:var(--brand);}
+.current-period{font-size:20px;font-weight:800;color:var(--text);}
+.btn-primary{background:var(--brand);color:#fff;border:none;padding:14px 32px;border-radius:var(--pill);font-size:15px;font-weight:700;cursor:pointer;transition:.15s;}
+.btn-primary:hover{background:var(--brand-dark);}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed;}
+.stats-row{display:flex;gap:14px;}
+.stat-card{background:var(--surface);border-radius:14px;padding:18px 24px;box-shadow:var(--shadow);font-size:15px;font-weight:700;color:var(--text);min-width:200px;text-align:center;}
+
+/* ── HISTORY PAGE ── */
+.history-wrap{display:flex;gap:20px;align-items:flex-start;}
+.hist-list-card{background:var(--surface);border-radius:14px;box-shadow:var(--shadow);padding:16px;width:220px;flex-shrink:0;display:flex;flex-direction:column;gap:6px;max-height:70vh;overflow-y:auto;}
+.hist-item{background:transparent;border:1.5px solid var(--border);border-radius:8px;padding:10px 12px;font-size:14px;font-weight:600;color:var(--text);cursor:pointer;text-align:left;transition:.15s;}
+.hist-item:hover{border-color:var(--brand);color:var(--brand);background:var(--brand-xlight);}
+.hist-empty{font-size:13px;color:var(--muted);padding:8px;}
+.hist-detail-card{background:var(--surface);border-radius:14px;box-shadow:var(--shadow);padding:20px;flex:1;overflow-x:auto;}
+.hist-table{border-collapse:collapse;width:100%;font-size:13px;}
+.hist-table th,.hist-table td{border:1px solid var(--border);padding:8px 12px;text-align:center;white-space:nowrap;}
+.hist-table th{background:var(--brand-xlight);color:var(--brand);font-weight:800;}
+.absent{color:#B91C1C;font-weight:700;}
+.btn-csv{background:transparent;color:var(--brand);border:1.5px solid var(--brand);padding:9px 18px;border-radius:var(--pill);font-size:13px;font-weight:700;cursor:pointer;margin-bottom:14px;transition:.15s;display:none;}
+.btn-csv:hover{background:var(--brand-xlight);}
+</style>
+</head>
+<body>
+
+<!-- ── AUTH ── -->
+<div id="auth-wrap" class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="auth-logo-mark">H</div>
+      <div class="auth-logo-title">QR 출석 관리</div>
+      <div class="auth-logo-sub">원장님 로그인</div>
+    </div>
+    <div class="auth-error" id="login-error"></div>
+    <label class="auth-form-label">이메일</label>
+    <input class="auth-input" id="login-email" type="email" placeholder="admin@example.com">
+    <label class="auth-form-label">비밀번호</label>
+    <input class="auth-input" id="login-pw" type="password" placeholder="비밀번호 입력" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="auth-btn auth-btn-primary" onclick="doLogin()">로그인</button>
+  </div>
+</div>
+
+<!-- ── DASHBOARD ── -->
+<div id="dashboard">
+  <div class="topbar">
+    <div class="topbar-title">까마귀 QR 출석</div>
+    <div class="tabs">
+      <button class="tab-btn active" id="tab-qr" onclick="showTab('qr')">실시간 QR</button>
+      <button class="tab-btn" id="tab-history" onclick="showTab('history')">지난 기록</button>
+    </div>
+    <button class="btn-logout" onclick="doLogout()">로그아웃</button>
+  </div>
+
+  <div class="page" id="page-qr" style="display:block;">
+    <div class="qr-wrap">
+      <div class="stats-row">
+        <div class="stat-card" id="roster-count">오늘 수강생 0명</div>
+        <div class="stat-card" id="checkin-count">이번 교시 체크 -</div>
+      </div>
+      <div class="qr-card">
+        <div class="current-period" id="current-period-label">교시 미시작</div>
+        <canvas id="qr-canvas" width="320" height="320"></canvas>
+        <div class="qr-countdown" id="qr-countdown"></div>
+      </div>
+      <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">다음 교시 시작</button>
+    </div>
+  </div>
+
+  <div class="page" id="page-history" style="display:none;">
+    <div class="history-wrap">
+      <div class="hist-list-card" id="history-list">
+        <div class="hist-empty">불러오는 중...</div>
+      </div>
+      <div style="flex:1;">
+        <button class="btn-csv" id="btn-csv" onclick="downloadCsv()">CSV 다운로드</button>
+        <div class="hist-detail-card" id="history-detail">
+          <div class="hist-empty">왼쪽에서 날짜를 선택하세요.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
