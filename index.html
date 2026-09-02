@@ -128,7 +128,8 @@
       if (!data.success) throw new Error(data.message || '인증번호 발송 실패');
       document.getElementById('signup-otp-row').style.display = 'block';
       startOtpCountdown();
-      // 발송 성공 후에도 비활성 유지(연타로 SMS 중복 발송 방지). 재발송은 아래 카운트다운 버튼으로.
+      // 발송 성공 시 큰 버튼은 숨김(재발송은 아래 카운트다운 버튼으로).
+      btn.style.display = 'none';
     } catch (e) {
       errEl.textContent = e.message;
       errEl.style.display = 'block';
@@ -589,7 +590,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
         <input class="auth-input" id="signup-otp-code" type="text" inputmode="numeric" placeholder="인증번호 입력">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
           <span id="signup-otp-countdown" style="font-size:13px;color:var(--muted);"></span>
-          <button id="btn-signup-resend" onclick="requestSignupOtp()" disabled style="margin-left:auto;background:transparent;border:1.5px solid var(--border);color:var(--muted);border-radius:var(--pill);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;">재발송</button>
+          <button id="btn-signup-resend" onclick="requestSignupOtp()" disabled style="margin-left:auto;background:transparent;border:1.5px solid var(--border);color:var(--muted);border-radius:var(--pill);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;">인증번호 다시 받기</button>
         </div>
         <button class="auth-btn auth-btn-primary" onclick="verifySignupOtp()">확인</button>
       </div>
@@ -602,8 +603,8 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
       <input class="auth-input" id="signup-email" type="email" placeholder="admin@example.com">
       <label class="auth-form-label">비밀번호 (최소 6자)</label>
       <input class="auth-input" id="signup-pw" type="password" placeholder="비밀번호 입력">
-      <label class="auth-form-label">학원명</label>
-      <input class="auth-input" id="signup-academy" type="text" placeholder="학원명 입력">
+      <label class="auth-form-label">교육기관명</label>
+      <input class="auth-input" id="signup-academy" type="text" placeholder="교육기관명 입력">
       <button class="auth-btn auth-btn-primary" id="btn-submit-signup" onclick="submitSignup()">가입하기</button>
     </div>
 
