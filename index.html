@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Here — QR 출석 관리</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
   import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
@@ -12,6 +12,7 @@
 
   // 로그인한 계정(uid)의 qrAdmins 문서에서 academyId를 조회해 채운다(doLogin 참고).
   let ACADEMY_ID = null;
+  let academyName = '';
 
   const FUNC_URL = 'https://us-central1-my-attendance-8122d.cloudfunctions.net';
 
@@ -65,10 +66,8 @@
         return;
       }
       ACADEMY_ID = adminSnap.data().academyId;
-      document.getElementById('auth-wrap').style.display = 'none';
-      document.getElementById('dashboard').style.display = 'flex';
-      startRosterListener();
-      await resumeIfInProgress();
+      academyName = adminSnap.data().academyName || '';
+      await enterDashboard();
     } catch (e) {
       errEl.textContent = '로그인 실패: 이메일 또는 비밀번호를 확인해주세요.';
       errEl.style.display = 'block';
@@ -88,6 +87,7 @@
   async function enterDashboard() {
     document.getElementById('auth-wrap').style.display = 'none';
     document.getElementById('dashboard').style.display = 'flex';
+    document.getElementById('topbar-title').textContent = (academyName || '까마귀') + ' QR 출석';
     startRosterListener();
     await resumeIfInProgress();
   }
@@ -95,7 +95,7 @@
   // ── 회원가입 (휴대폰 인증) ──
   let otpTimer = null;
   let otpSecondsLeft = 0;
-  let signupPending = null; // 가입 성공 후 로그인 대기중인 { email, password, academyId }
+  let signupPending = null; // 가입 성공 후 로그인 대기중인 { email, password, academyId, academyName }
 
   window.showSignup = function () {
     document.getElementById('auth-wrap').querySelector('.auth-card').style.display = 'none';
@@ -211,7 +211,7 @@
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.message || '가입 실패');
-      signupPending = { email, password, academyId: data.academyId };
+      signupPending = { email, password, academyId: data.academyId, academyName };
       document.getElementById('signup-invite-code').textContent = data.inviteCode;
       document.getElementById('signup-invite-modal').style.display = 'flex';
     } catch (e) {
@@ -225,11 +225,12 @@
   window.closeSignupInviteModal = async function () {
     document.getElementById('signup-invite-modal').style.display = 'none';
     if (!signupPending) return;
-    const { email, password, academyId } = signupPending;
+    const { email, password, academyId, academyName: signedUpAcademyName } = signupPending;
     signupPending = null;
     try {
       await signInWithEmailAndPassword(auth, email, password);
       ACADEMY_ID = academyId;
+      academyName = signedUpAcademyName;
       await enterDashboard();
     } catch (e) {
       document.getElementById('signup-card').style.display = 'none';
@@ -268,7 +269,7 @@
       const data = await res.json();
       currentPeriod = data.period;
       document.getElementById('current-period-label').textContent = `현재 ${data.period}교시`;
-      await drawQr(data.qrPayload);
+      drawQr(data.qrPayload);
       resubscribeCheckins();
       startRotateLoop();
     } catch (e) {
@@ -295,7 +296,7 @@
       if (!res.ok) return;
       const rdata = await res.json();
       if (!rdata.success) return;
-      await drawQr(rdata.qrPayload);
+      drawQr(rdata.qrPayload);
       resubscribeCheckins();
       startRotateLoop();
     } catch (e) {
@@ -328,7 +329,7 @@
       });
       if (!res.ok) throw new Error('갱신 실패');
       const data = await res.json();
-      await drawQr(data.qrPayload);
+      drawQr(data.qrPayload);
       countdownSec = 5;
       updateCountdownLabel();
     } catch (e) {
@@ -336,9 +337,10 @@
     }
   }
 
-  async function drawQr(payload) {
-    const canvas = document.getElementById('qr-canvas');
-    await QRCode.toCanvas(canvas, payload, { width: 320, margin: 1 });
+  function drawQr(payload) {
+    const container = document.getElementById('qr-canvas');
+    container.innerHTML = '';
+    new QRCode(container, { text: payload, width: 440, height: 440, correctLevel: QRCode.CorrectLevel.M });
   }
 
   function startRosterListener() {
@@ -364,14 +366,38 @@
       `이번 교시 체크 ${lastCheckinSize}명 / 미체크 ${absent}명`;
   }
 
+  function maskName(name) {
+    const s = String(name || '').trim();
+    if (s.length <= 1) return s;
+    return s.slice(0, -1) + '*';
+  }
+  function last4Phone(phone) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    return digits.length >= 4 ? digits.slice(-4) : digits;
+  }
+  function renderRosterPanel(list) {
+    document.getElementById('roster-panel-header').textContent = `${lastCheckinSize}명/${lastRosterSize}명`;
+    const listEl = document.getElementById('roster-panel-list');
+    if (!list.length) {
+      listEl.innerHTML = '<div class="roster-empty">아직 체크한 학생이 없습니다.</div>';
+      return;
+    }
+    listEl.innerHTML = list.map(c =>
+      `<div class="roster-item"><span>${escapeHtml(maskName(c.name))}</span><span class="roster-phone">${escapeHtml(last4Phone(c.phone))}</span></div>`
+    ).join('');
+  }
+
   function resubscribeCheckins() {
     if (checkinsUnsub) { checkinsUnsub(); checkinsUnsub = null; }
-    if (currentPeriod == null) return;
+    if (currentPeriod == null) { renderRosterPanel([]); return; }
     const sid = sessionId();
     const q = query(collection(db, 'qrSessions', sid, 'checkins'), where('period', '==', currentPeriod));
     checkinsUnsub = onSnapshot(q, (snap) => {
       lastCheckinSize = snap.size;
       renderCheckinLabel();
+      const list = [];
+      snap.forEach(d => list.push(d.data()));
+      renderRosterPanel(list);
     });
   }
 
@@ -526,7 +552,8 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .page{padding:32px;}
 
 /* ── QR PAGE ── */
-.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:18px;}
+.qr-wrap{display:flex;gap:24px;align-items:flex-start;justify-content:center;}
+.qr-left{display:flex;flex-direction:column;align-items:center;gap:18px;}
 .qr-card{background:var(--surface);border-radius:20px;padding:36px;box-shadow:var(--shadow);display:flex;flex-direction:column;align-items:center;gap:16px;}
 #qr-canvas{border-radius:12px;}
 .qr-countdown{font-size:15px;font-weight:700;color:var(--brand);}
@@ -536,6 +563,14 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .btn-primary:disabled{opacity:.5;cursor:not-allowed;}
 .stats-row{display:flex;gap:14px;}
 .stat-card{background:var(--surface);border-radius:14px;padding:18px 24px;box-shadow:var(--shadow);font-size:15px;font-weight:700;color:var(--text);min-width:200px;text-align:center;}
+
+/* ── ROSTER PANEL ── */
+.roster-panel{background:var(--surface);border-radius:20px;padding:24px;box-shadow:var(--shadow);width:280px;flex-shrink:0;max-height:600px;display:flex;flex-direction:column;}
+.roster-panel-header{font-size:18px;font-weight:800;color:var(--brand);margin-bottom:14px;text-align:center;}
+.roster-panel-list{overflow-y:auto;display:flex;flex-direction:column;gap:6px;}
+.roster-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--canvas);border-radius:8px;font-size:14px;font-weight:600;}
+.roster-phone{color:var(--muted);font-weight:700;font-size:13px;}
+.roster-empty{font-size:13px;color:var(--muted);text-align:center;padding:20px;}
 
 /* ── HISTORY PAGE ── */
 .history-wrap{display:flex;gap:20px;align-items:flex-start;}
@@ -628,7 +663,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 <!-- ── DASHBOARD ── -->
 <div id="dashboard">
   <div class="topbar">
-    <div class="topbar-title">까마귀 QR 출석</div>
+    <div class="topbar-title" id="topbar-title">까마귀 QR 출석</div>
     <div class="tabs">
       <button class="tab-btn active" id="tab-qr" onclick="showTab('qr')">실시간 QR</button>
       <button class="tab-btn" id="tab-history" onclick="showTab('history')">지난 기록</button>
@@ -638,16 +673,24 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 
   <div class="page" id="page-qr" style="display:block;">
     <div class="qr-wrap">
-      <div class="stats-row">
-        <div class="stat-card" id="roster-count">오늘 수강생 0명</div>
-        <div class="stat-card" id="checkin-count">이번 교시 체크 -</div>
+      <div class="qr-left">
+        <div class="stats-row">
+          <div class="stat-card" id="roster-count">오늘 수강생 0명</div>
+          <div class="stat-card" id="checkin-count">이번 교시 체크 -</div>
+        </div>
+        <div class="qr-card">
+          <div class="current-period" id="current-period-label">교시 미시작</div>
+          <div id="qr-canvas"></div>
+          <div class="qr-countdown" id="qr-countdown"></div>
+        </div>
+        <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">다음 교시 시작</button>
       </div>
-      <div class="qr-card">
-        <div class="current-period" id="current-period-label">교시 미시작</div>
-        <canvas id="qr-canvas" width="320" height="320"></canvas>
-        <div class="qr-countdown" id="qr-countdown"></div>
+      <div class="roster-panel">
+        <div class="roster-panel-header" id="roster-panel-header">0명/0명</div>
+        <div class="roster-panel-list" id="roster-panel-list">
+          <div class="roster-empty">교시를 시작하면 표시됩니다.</div>
+        </div>
       </div>
-      <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">다음 교시 시작</button>
     </div>
   </div>
 
