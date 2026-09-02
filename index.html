@@ -298,7 +298,7 @@
       clearRotateInterval();
       if (checkinsUnsub) { checkinsUnsub(); checkinsUnsub = null; }
       currentPeriod = null;
-      document.getElementById('qr-canvas').innerHTML = '';
+      document.getElementById('qr-canvas').innerHTML = '<span class="qr-placeholder">시작 전</span>';
       document.getElementById('qr-countdown').textContent = '';
       document.getElementById('session-date').disabled = false;
       btn.style.display = 'none';
@@ -378,6 +378,7 @@
   }
 
   function renderPeriodTabs() {
+    document.getElementById('btn-start-period').textContent = currentPeriod ? '다음 교시 시작' : '수업시작';
     const tabsEl = document.getElementById('period-tabs');
     const labelEl = document.getElementById('current-period-label');
     if (!currentPeriod) {
@@ -601,10 +602,11 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .page{padding:32px;}
 
 /* ── QR PAGE ── */
-.qr-wrap{display:flex;gap:24px;align-items:flex-start;justify-content:center;}
+.qr-wrap{display:flex;gap:24px;align-items:stretch;justify-content:center;}
 .qr-left{display:flex;flex-direction:column;align-items:center;gap:18px;}
 .qr-card{background:var(--surface);border-radius:20px;padding:36px;box-shadow:var(--shadow);display:flex;flex-direction:column;align-items:center;gap:16px;}
-#qr-canvas{border-radius:12px;}
+#qr-canvas{border-radius:12px;min-width:440px;min-height:440px;display:flex;align-items:center;justify-content:center;}
+.qr-placeholder{font-size:20px;font-weight:700;color:var(--muted);}
 .qr-countdown{font-size:15px;font-weight:700;color:var(--brand);}
 .current-period{font-size:20px;font-weight:800;color:var(--text);}
 .btn-primary{background:var(--brand);color:#fff;border:none;padding:14px 32px;border-radius:var(--pill);font-size:15px;font-weight:700;cursor:pointer;transition:.15s;}
@@ -616,9 +618,9 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .period-tab.active{background:var(--brand);color:#fff;border-color:var(--brand);}
 
 /* ── ROSTER PANEL ── */
-.roster-panel{background:var(--surface);border-radius:20px;padding:24px;box-shadow:var(--shadow);width:280px;flex-shrink:0;max-height:600px;display:flex;flex-direction:column;}
+.roster-panel{background:var(--surface);border-radius:20px;padding:24px;box-shadow:var(--shadow);width:340px;flex-shrink:0;display:flex;flex-direction:column;}
 .roster-panel-header{font-size:18px;font-weight:800;color:var(--brand);margin-bottom:14px;text-align:center;}
-.roster-panel-list{overflow-y:auto;display:flex;flex-direction:column;gap:6px;}
+.roster-panel-list{overflow-y:auto;display:flex;flex-direction:column;gap:6px;flex:1;}
 .roster-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--canvas);border-radius:8px;font-size:14px;font-weight:600;}
 .roster-phone{color:var(--muted);font-weight:700;font-size:13px;}
 .roster-empty{font-size:13px;color:var(--muted);text-align:center;padding:20px;}
@@ -726,18 +728,18 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     <div class="qr-wrap">
       <div class="qr-left">
         <div style="display:flex;align-items:center;gap:10px;">
-          <label class="auth-form-label" style="margin:0;">세션 날짜</label>
-          <input type="date" id="session-date" class="auth-input" style="width:auto;margin:0;padding:8px 12px;">
+          <label class="auth-form-label" style="margin:0;font-size:15px;font-weight:700;">세션 날짜</label>
+          <input type="date" id="session-date" class="auth-input" style="width:auto;margin:0;font-size:22px;font-weight:800;padding:14px 18px;">
         </div>
         <div class="qr-card">
           <div class="current-period" id="current-period-label">교시 미시작</div>
           <div class="qr-body">
             <div class="period-tabs" id="period-tabs"></div>
-            <div id="qr-canvas"></div>
+            <div id="qr-canvas"><span class="qr-placeholder">시작 전</span></div>
           </div>
           <div class="qr-countdown" id="qr-countdown"></div>
         </div>
-        <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">다음 교시 시작</button>
+        <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">수업시작</button>
         <button class="btn-logout" id="btn-end-session" onclick="endSession()" style="display:none;">세션 종료</button>
       </div>
       <div class="roster-panel">
