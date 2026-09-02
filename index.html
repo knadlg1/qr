@@ -456,23 +456,34 @@
     const listEl = document.getElementById('history-list');
     listEl.innerHTML = '<div class="hist-empty">불러오는 중...</div>';
     try {
-      const q = query(
-        collection(db, 'qrSessions'),
-        where('academyId', '==', ACADEMY_ID),
-        orderBy('date', 'desc')
-      );
-      const snap = await getDocs(q);
+      let snap;
+      try {
+        const q = query(
+          collection(db, 'qrSessions'),
+          where('academyId', '==', ACADEMY_ID),
+          orderBy('date', 'desc')
+        );
+        snap = await getDocs(q);
+      } catch (e) {
+        const q2 = query(
+          collection(db, 'qrSessions'),
+          where('academyId', '==', ACADEMY_ID)
+        );
+        snap = await getDocs(q2);
+      }
       if (snap.empty) {
         listEl.innerHTML = '<div class="hist-empty">기록이 없습니다.</div>';
         return;
       }
+      const docs = [];
+      snap.forEach((d) => docs.push({ id: d.id, data: d.data() }));
+      docs.sort((a, b) => (b.data.date || '').localeCompare(a.data.date || ''));
       listEl.innerHTML = '';
-      snap.forEach((d) => {
-        const data = d.data();
+      docs.forEach(({ id, data }) => {
         const item = document.createElement('button');
         item.className = 'hist-item';
-        item.textContent = data.date || d.id;
-        item.onclick = () => loadSessionDetail(d.id, data);
+        item.textContent = data.date || id;
+        item.onclick = () => loadSessionDetail(id, data);
         listEl.appendChild(item);
       });
     } catch (e) {
@@ -614,7 +625,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .btn-primary:disabled{opacity:.5;cursor:not-allowed;}
 .qr-body{display:flex;align-items:center;gap:16px;}
 .period-tabs{display:flex;flex-direction:column;gap:6px;max-height:440px;overflow-y:auto;}
-.period-tab{padding:10px 18px;border-radius:10px;font-size:14px;font-weight:700;text-align:center;background:#fff;color:var(--text);border:1.5px solid var(--border);white-space:nowrap;}
+.period-tab{padding:10px 18px;border-radius:10px;font-size:14px;font-weight:800;text-align:center;background:#fff;color:var(--text);border:1.5px solid var(--border);white-space:nowrap;}
 .period-tab.active{background:var(--brand);color:#fff;border-color:var(--brand);}
 
 /* ── ROSTER PANEL ── */
@@ -728,7 +739,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     <div class="qr-wrap">
       <div class="qr-left">
         <div style="display:flex;align-items:center;gap:10px;">
-          <label class="auth-form-label" style="margin:0;font-size:15px;font-weight:700;">세션 날짜</label>
+          <label class="auth-form-label" style="margin:0;font-size:15px;font-weight:800;">세션 날짜</label>
           <input type="date" id="session-date" class="auth-input" style="width:auto;margin:0;font-size:22px;font-weight:800;padding:14px 18px;">
         </div>
         <div class="qr-card">
