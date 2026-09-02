@@ -88,6 +88,7 @@
     document.getElementById('auth-wrap').style.display = 'none';
     document.getElementById('dashboard').style.display = 'flex';
     document.getElementById('topbar-title').textContent = (academyName || '까마귀') + ' QR 출석';
+    document.getElementById('session-date').value = todayKST();
     startRosterListener();
     await resumeIfInProgress();
   }
@@ -263,12 +264,13 @@
       const res = await fetch(`${FUNC_URL}/startQrPeriod`, {
         method: 'POST',
         headers: await authHeader(),
-        body: JSON.stringify({ academyId: ACADEMY_ID })
+        body: JSON.stringify({ academyId: ACADEMY_ID, date: document.getElementById('session-date').value })
       });
       if (!res.ok) throw new Error('요청 실패');
       const data = await res.json();
       currentPeriod = data.period;
-      document.getElementById('current-period-label').textContent = `현재 ${data.period}교시`;
+      renderPeriodTabs();
+      document.getElementById('session-date').disabled = true;
       drawQr(data.qrPayload);
       resubscribeCheckins();
       startRotateLoop();
@@ -287,7 +289,8 @@
       const data = snap.data();
       if (!data.currentPeriod) return;
       currentPeriod = data.currentPeriod;
-      document.getElementById('current-period-label').textContent = `현재 ${currentPeriod}교시`;
+      renderPeriodTabs();
+      document.getElementById('session-date').disabled = true;
       const res = await fetch(`${FUNC_URL}/rotateQrToken`, {
         method: 'POST',
         headers: await authHeader(),
@@ -343,27 +346,43 @@
     new QRCode(container, { text: payload, width: 440, height: 440, correctLevel: QRCode.CorrectLevel.M });
   }
 
+  function renderPeriodTabs() {
+    const tabsEl = document.getElementById('period-tabs');
+    const labelEl = document.getElementById('current-period-label');
+    if (!currentPeriod) {
+      tabsEl.innerHTML = '';
+      labelEl.style.display = 'block';
+      labelEl.textContent = '교시 미시작';
+      return;
+    }
+    labelEl.style.display = 'none';
+    let html = '';
+    for (let i = 1; i <= currentPeriod; i++) {
+      html += `<div class="period-tab${i === currentPeriod ? ' active' : ''}">${i}교시</div>`;
+    }
+    tabsEl.innerHTML = html;
+  }
+
   function startRosterListener() {
     const sid = sessionId();
     if (rosterUnsub) rosterUnsub();
     rosterUnsub = onSnapshot(collection(db, 'qrSessions', sid, 'roster'), (snap) => {
       lastRosterSize = snap.size;
-      document.getElementById('roster-count').textContent = `오늘 수강생 ${snap.size}명`;
-      renderCheckinLabel();
+      updatePanelHeader();
     });
   }
 
   let lastRosterSize = 0;
   let lastCheckinSize = 0;
 
-  function renderCheckinLabel() {
+  function updatePanelHeader() {
+    const el = document.getElementById('roster-panel-header');
     if (currentPeriod == null) {
-      document.getElementById('checkin-count').textContent = '이번 교시 체크 -';
+      el.innerHTML = `<div>오늘 수강생 ${lastRosterSize}명</div><div style="margin-top:6px;font-size:14px;font-weight:600;color:var(--muted);">이번 교시 체크 -</div>`;
       return;
     }
     const absent = Math.max(lastRosterSize - lastCheckinSize, 0);
-    document.getElementById('checkin-count').textContent =
-      `이번 교시 체크 ${lastCheckinSize}명 / 미체크 ${absent}명`;
+    el.innerHTML = `<div>오늘 수강생 ${lastRosterSize}명</div><div style="margin-top:6px;font-size:14px;font-weight:600;color:var(--muted);">이번 교시 체크 ${lastCheckinSize}명 / 미체크 ${absent}명</div>`;
   }
 
   function maskName(name) {
@@ -376,7 +395,6 @@
     return digits.length >= 4 ? digits.slice(-4) : digits;
   }
   function renderRosterPanel(list) {
-    document.getElementById('roster-panel-header').textContent = `${lastCheckinSize}명/${lastRosterSize}명`;
     const listEl = document.getElementById('roster-panel-list');
     if (!list.length) {
       listEl.innerHTML = '<div class="roster-empty">아직 체크한 학생이 없습니다.</div>';
@@ -394,7 +412,7 @@
     const q = query(collection(db, 'qrSessions', sid, 'checkins'), where('period', '==', currentPeriod));
     checkinsUnsub = onSnapshot(q, (snap) => {
       lastCheckinSize = snap.size;
-      renderCheckinLabel();
+      updatePanelHeader();
       const list = [];
       snap.forEach(d => list.push(d.data()));
       renderRosterPanel(list);
@@ -561,8 +579,10 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 .btn-primary{background:var(--brand);color:#fff;border:none;padding:14px 32px;border-radius:var(--pill);font-size:15px;font-weight:700;cursor:pointer;transition:.15s;}
 .btn-primary:hover{background:var(--brand-dark);}
 .btn-primary:disabled{opacity:.5;cursor:not-allowed;}
-.stats-row{display:flex;gap:14px;}
-.stat-card{background:var(--surface);border-radius:14px;padding:18px 24px;box-shadow:var(--shadow);font-size:15px;font-weight:700;color:var(--text);min-width:200px;text-align:center;}
+.qr-body{display:flex;align-items:center;gap:16px;}
+.period-tabs{display:flex;flex-direction:column;gap:6px;max-height:440px;overflow-y:auto;}
+.period-tab{padding:10px 18px;border-radius:10px;font-size:14px;font-weight:700;text-align:center;background:#fff;color:var(--text);border:1.5px solid var(--border);white-space:nowrap;}
+.period-tab.active{background:var(--brand);color:#fff;border-color:var(--brand);}
 
 /* ── ROSTER PANEL ── */
 .roster-panel{background:var(--surface);border-radius:20px;padding:24px;box-shadow:var(--shadow);width:280px;flex-shrink:0;max-height:600px;display:flex;flex-direction:column;}
@@ -674,19 +694,22 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
   <div class="page" id="page-qr" style="display:block;">
     <div class="qr-wrap">
       <div class="qr-left">
-        <div class="stats-row">
-          <div class="stat-card" id="roster-count">오늘 수강생 0명</div>
-          <div class="stat-card" id="checkin-count">이번 교시 체크 -</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label class="auth-form-label" style="margin:0;">세션 날짜</label>
+          <input type="date" id="session-date" class="auth-input" style="width:auto;margin:0;padding:8px 12px;">
         </div>
         <div class="qr-card">
           <div class="current-period" id="current-period-label">교시 미시작</div>
-          <div id="qr-canvas"></div>
+          <div class="qr-body">
+            <div class="period-tabs" id="period-tabs"></div>
+            <div id="qr-canvas"></div>
+          </div>
           <div class="qr-countdown" id="qr-countdown"></div>
         </div>
         <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">다음 교시 시작</button>
       </div>
       <div class="roster-panel">
-        <div class="roster-panel-header" id="roster-panel-header">0명/0명</div>
+        <div class="roster-panel-header" id="roster-panel-header"><div>오늘 수강생 0명</div><div style="margin-top:6px;font-size:14px;font-weight:600;color:var(--muted);">이번 교시 체크 -</div></div>
         <div class="roster-panel-list" id="roster-panel-list">
           <div class="roster-empty">교시를 시작하면 표시됩니다.</div>
         </div>
