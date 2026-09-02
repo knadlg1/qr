@@ -5,10 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Here — QR 출석 관리</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
   import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
-  import { getFirestore, collection, doc, getDoc, query, where, orderBy, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
+  import { getFirestore, collection, doc, getDoc, query, where, orderBy, getDocs, onSnapshot, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 
   // 로그인한 계정(uid)의 qrAdmins 문서에서 academyId를 조회해 채운다(doLogin 참고).
   let ACADEMY_ID = null;
@@ -246,8 +247,10 @@
   window.showTab = function (tab) {
     document.getElementById('tab-qr').classList.toggle('active', tab === 'qr');
     document.getElementById('tab-history').classList.toggle('active', tab === 'history');
+    document.getElementById('tab-students').classList.toggle('active', tab === 'students');
     document.getElementById('page-qr').style.display = tab === 'qr' ? 'block' : 'none';
     document.getElementById('page-history').style.display = tab === 'history' ? 'block' : 'none';
+    document.getElementById('page-students').style.display = tab === 'students' ? 'block' : 'none';
     if (tab === 'history') loadHistoryList();
   };
 
@@ -593,6 +596,153 @@
     closeDocGenModal();
     alert(`선택된 학생 ${selected.length}명 — 문서 틀(xlsx)이 아직 연결되지 않아 실제 파일 생성은 준비 중입니다.`);
   };
+
+  // ── 학생 정보 엑셀 업로드 ──
+  let excelRawRows = []; // 헤더 제외 데이터 행들, 2차원 배열
+  let excelHeaders = [];
+  let pendingMatched = [];   // [{ kakaoId, extra }]
+  let pendingUnmatched = []; // [{ name, phone, extra }]
+
+  window.handleExcelUpload = function (event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      if (!rows.length) { alert('빈 파일입니다.'); return; }
+      excelHeaders = rows[0].map(h => String(h ?? '').trim());
+      excelRawRows = rows.slice(1).filter(r => r.some(c => String(c ?? '').trim() !== ''));
+      renderColumnMapping();
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  function renderColumnMapping() {
+    const area = document.getElementById('excel-mapping-area');
+    area.style.display = 'block';
+    document.getElementById('excel-match-area').style.display = 'none';
+    area.innerHTML = `
+      <p style="font-size:13px;font-weight:700;margin-bottom:10px;">각 열이 무엇인지 지정해주세요 (${excelRawRows.length}행 감지됨)</p>
+      ${excelHeaders.map((h, i) => `
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+          <span style="width:160px;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(h)}">${escapeHtml(h || '(제목없음 ' + (i + 1) + '열)')}</span>
+          <select class="auth-input" style="margin:0;width:auto;flex:1;" data-col="${i}" id="excel-col-${i}">
+            <option value="extra">기타정보로 저장</option>
+            <option value="name">이름</option>
+            <option value="phone">휴대폰번호</option>
+          </select>
+        </div>
+      `).join('')}
+      <button class="btn-primary" style="margin-top:10px;" onclick="confirmColumnMapping()">다음: 매칭 확인</button>
+    `;
+  }
+
+  function findMappedCol(type) {
+    for (let i = 0; i < excelHeaders.length; i++) {
+      const sel = document.getElementById('excel-col-' + i);
+      if (sel && sel.value === type) return i;
+    }
+    return -1;
+  }
+
+  function normalizePhone(v) {
+    return String(v ?? '').replace(/\D/g, '');
+  }
+
+  window.confirmColumnMapping = async function () {
+    const nameCol = findMappedCol('name');
+    const phoneCol = findMappedCol('phone');
+    if (phoneCol === -1) { alert('휴대폰번호 열을 지정해주세요.'); return; }
+
+    const parsedRows = excelRawRows.map(r => {
+      const extra = {};
+      excelHeaders.forEach((h, i) => {
+        if (i === nameCol || i === phoneCol) return;
+        const type = document.getElementById('excel-col-' + i).value;
+        if (type === 'extra') extra[h || ('열' + (i + 1))] = r[i] ?? '';
+      });
+      return {
+        name: nameCol !== -1 ? String(r[nameCol] ?? '').trim() : '',
+        phone: normalizePhone(r[phoneCol]),
+        extra,
+      };
+    }).filter(row => row.phone);
+
+    const studentsSnap = await getDocs(query(collection(db, 'students'), where('academyId', '==', ACADEMY_ID)));
+    const phoneMap = {};
+    const allStudents = [];
+    studentsSnap.forEach(d => {
+      const s = d.data();
+      allStudents.push({ kakaoId: d.id, name: s.name || '', phone: s.phone || '' });
+      const p = normalizePhone(s.phone);
+      if (p) phoneMap[p] = { kakaoId: d.id, name: s.name || '' };
+    });
+
+    renderMatchArea(parsedRows, phoneMap, allStudents);
+  };
+
+  function renderMatchArea(parsedRows, phoneMap, allStudents) {
+    const area = document.getElementById('excel-match-area');
+    area.style.display = 'block';
+
+    pendingMatched = [];
+    pendingUnmatched = [];
+    parsedRows.forEach(row => {
+      const hit = phoneMap[row.phone];
+      if (hit) pendingMatched.push({ kakaoId: hit.kakaoId, extra: row.extra });
+      else pendingUnmatched.push(row);
+    });
+
+    const studentOptions = allStudents.map(s => `<option value="${s.kakaoId}">${escapeHtml(s.name)} (${escapeHtml(String(s.phone || '').slice(-4))})</option>`).join('');
+
+    area.innerHTML = `
+      <p style="font-size:14px;font-weight:800;color:var(--brand);">매칭됨 ${pendingMatched.length}명 / 매칭안됨 ${pendingUnmatched.length}명</p>
+      ${pendingUnmatched.length ? `
+        <div style="margin-top:12px;">
+          <p style="font-size:13px;font-weight:700;margin-bottom:8px;color:#B91C1C;">매칭 안 된 항목 — 직접 선택해주세요</p>
+          ${pendingUnmatched.map((row, i) => `
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+              <span style="width:140px;font-size:13px;">${escapeHtml(row.name || '(이름없음)')} · ${escapeHtml(row.phone)}</span>
+              <select class="auth-input" style="margin:0;width:auto;flex:1;" id="unmatched-select-${i}">
+                <option value="">-- 매칭 안 함(건너뛰기) --</option>
+                ${studentOptions}
+              </select>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+      <button class="btn-primary" style="margin-top:16px;" onclick="saveExcelMatches()">저장하기</button>
+    `;
+  }
+
+  window.saveExcelMatches = async function () {
+    const rowsToSave = pendingMatched.slice();
+    pendingUnmatched.forEach((row, i) => {
+      const sel = document.getElementById('unmatched-select-' + i);
+      if (sel && sel.value) rowsToSave.push({ kakaoId: sel.value, extra: row.extra });
+    });
+    if (!rowsToSave.length) { alert('저장할 항목이 없습니다.'); return; }
+    try {
+      for (const row of rowsToSave) {
+        await setDoc(doc(db, 'studentExtraInfo', row.kakaoId), {
+          academyId: ACADEMY_ID,
+          updatedAt: serverTimestamp(),
+          fields: row.extra,
+        }, { merge: true });
+      }
+      alert(`${rowsToSave.length}명의 정보를 저장했습니다.`);
+      document.getElementById('excel-mapping-area').style.display = 'none';
+      document.getElementById('excel-match-area').style.display = 'none';
+      document.getElementById('excel-file-input').value = '';
+      pendingMatched = [];
+      pendingUnmatched = [];
+    } catch (e) {
+      alert('저장 실패: ' + e.message);
+    }
+  };
 </script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap');
@@ -782,6 +932,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     <div class="tabs">
       <button class="tab-btn active" id="tab-qr" onclick="showTab('qr')">실시간 QR</button>
       <button class="tab-btn" id="tab-history" onclick="showTab('history')">지난 기록</button>
+      <button class="tab-btn" id="tab-students" onclick="showTab('students')">학생 정보</button>
     </div>
     <button class="btn-logout" onclick="doLogout()">로그아웃</button>
   </div>
@@ -825,6 +976,16 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
           <div class="hist-empty">왼쪽에서 날짜를 선택하세요.</div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="page" id="page-students" style="display:none;">
+    <div class="card" style="background:var(--surface);border-radius:20px;padding:28px;box-shadow:var(--shadow);max-width:900px;">
+      <h3 style="font-size:18px;font-weight:800;margin-bottom:6px;">학생 정보 엑셀 업로드</h3>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">이름/전화번호가 포함된 엑셀 파일을 업로드하면, 전화번호로 기존 학생과 매칭해서 나머지 정보를 저장합니다.</p>
+      <input type="file" id="excel-file-input" accept=".xlsx,.xls" onchange="handleExcelUpload(event)">
+      <div id="excel-mapping-area" style="display:none;margin-top:20px;"></div>
+      <div id="excel-match-area" style="display:none;margin-top:20px;"></div>
     </div>
   </div>
 </div>
