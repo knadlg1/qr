@@ -508,6 +508,7 @@
     rosterSnap.forEach((d) => students.push({ id: d.id, ...d.data() }));
     docGenStudents = students;
     docGenSessionLabel = (sessionData.date || sid) + ' 출석 명단';
+    docGenSessionDate = sessionData.date || sid;
 
     const checkinMap = {}; // studentId -> { period: time }
     checkinsSnap.forEach((d) => {
@@ -516,12 +517,13 @@
       if (!checkinMap[sid2]) checkinMap[sid2] = {};
       let timeStr = '';
       if (c.checkedAt && c.checkedAt.toDate) {
-        timeStr = c.checkedAt.toDate().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+        timeStr = c.checkedAt.toDate().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Seoul' });
       } else if (c.checkedAt) {
         timeStr = String(c.checkedAt);
       }
       checkinMap[sid2][c.period] = timeStr;
     });
+    docGenCheckinMap = checkinMap;
 
     let html = '<table class="hist-table"><thead><tr><th>학생</th>';
     periodsRun.forEach((p) => { html += `<th>${p}교시</th>`; });
@@ -566,6 +568,8 @@
 
   let docGenStudents = []; // 현재 열려있는 세션의 학생 목록: [{id, name}]
   let docGenSessionLabel = '';
+  let docGenSessionDate = ''; // 세션 실제 날짜(YYYY-MM-DD) — 문서생성 연도 계산용
+  let docGenCheckinMap = {}; // studentId -> { period: time } — 문서생성 시 교시별 체크인 시간
 
   window.openDocGenModal = function () {
     const listEl = document.getElementById('doc-gen-student-list');
@@ -587,13 +591,88 @@
     document.getElementById('doc-gen-modal').style.display = 'none';
   };
 
-  window.confirmDocGen = function () {
+  window.confirmDocGen = async function () {
     const selected = [];
     document.querySelectorAll('.doc-gen-check').forEach(cb => {
       if (cb.checked) selected.push(docGenStudents[Number(cb.dataset.idx)]);
     });
+    if (!selected.length) { alert('선택된 학생이 없습니다.'); return; }
     closeDocGenModal();
-    alert(`선택된 학생 ${selected.length}명 — 문서 틀(xlsx)이 아직 연결되지 않아 실제 파일 생성은 준비 중입니다.`);
+
+    try {
+      const res = await fetch('./template-연수교육.xlsx');
+      const buf = await res.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellStyles: true });
+      const sheetName = wb.SheetNames.includes('시트1') ? '시트1' : wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+
+      const extraSnaps = await Promise.all(selected.map(s => getDoc(doc(db, 'studentExtraInfo', s.id))));
+
+      const dateStr = String(docGenSessionDate || '');
+      const year = /^\d{4}-\d{2}-\d{2}/.test(dateStr) ? dateStr.slice(0, 4) : String(new Date().getFullYear());
+      const a1 = XLSX.utils.encode_cell({ r: 0, c: 0 });
+      if (sheet[a1] && typeof sheet[a1].v === 'string') {
+        sheet[a1].v = sheet[a1].v.replace('{{교육년도}}', year + '년').replace('{{교육기관명}}', academyName || '');
+      }
+
+      const setCell = (r, c, v) => {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        sheet[addr] = { t: 's', v: String(v ?? '') };
+      };
+
+      const totalBlocks = selected.length;
+      const existingBlocks = 15;
+      if (totalBlocks > existingBlocks) {
+        const extra = totalBlocks - existingBlocks;
+        for (let i = 0; i < extra; i++) {
+          const blockIdx = existingBlocks + i;
+          const newFirstRow = 3 + 3 * blockIdx;
+          [0, 1, 2, 3, 4, 11].forEach(c => {
+            sheet['!merges'].push({ s: { r: newFirstRow, c }, e: { r: newFirstRow + 2, c } });
+          });
+          for (let sub = 0; sub < 3; sub++) {
+            setCell(newFirstRow + sub, 5, sub + 1);
+            setCell(newFirstRow + sub, 7, sub + 4);
+            setCell(newFirstRow + sub, 9, sub + 7);
+          }
+        }
+      }
+
+      selected.forEach((s, i) => {
+        const blockFirstRow = 3 + 3 * i;
+        const extraSnap = extraSnaps[i];
+        const extra = extraSnap.exists() ? (extraSnap.data().fields || {}) : {};
+        setCell(blockFirstRow, 0, i + 1);
+        setCell(blockFirstRow, 1, s.name || '');
+        setCell(blockFirstRow, 2, extra['면허번호'] || '');
+        setCell(blockFirstRow, 3, extra['근무처명'] || '');
+
+        const times = (docGenCheckinMap && docGenCheckinMap[s.id]) || {};
+        for (let p = 1; p <= 9; p++) {
+          const subRow = (p - 1) % 3;
+          const periodCol = 5 + 2 * Math.floor((p - 1) / 3);
+          if (times[p]) setCell(blockFirstRow + subRow, periodCol + 1, times[p]);
+        }
+      });
+
+      const lastRow = 3 + 3 * Math.max(totalBlocks, existingBlocks) - 1;
+      const range = XLSX.utils.decode_range(sheet['!ref']);
+      if (lastRow > range.e.r) {
+        range.e.r = lastRow;
+        sheet['!ref'] = XLSX.utils.encode_range(range);
+      }
+
+      const wbout = XLSX.write(wb, { type: 'array', bookType: 'xlsx', cellStyles: true });
+      const blob = new Blob([wbout], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${docGenSessionLabel || 'session'}_연수교육_참석자명단.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('문서 생성 실패: ' + e.message);
+    }
   };
 
   window.openExcelUploadModal = function () {
