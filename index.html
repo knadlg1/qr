@@ -247,10 +247,8 @@
   window.showTab = function (tab) {
     document.getElementById('tab-qr').classList.toggle('active', tab === 'qr');
     document.getElementById('tab-history').classList.toggle('active', tab === 'history');
-    document.getElementById('tab-students').classList.toggle('active', tab === 'students');
     document.getElementById('page-qr').style.display = tab === 'qr' ? 'block' : 'none';
     document.getElementById('page-history').style.display = tab === 'history' ? 'block' : 'none';
-    document.getElementById('page-students').style.display = tab === 'students' ? 'block' : 'none';
     if (tab === 'history') loadHistoryList();
   };
 
@@ -540,6 +538,7 @@
     detailEl.innerHTML = html;
     document.getElementById('btn-csv').style.display = students.length ? 'inline-block' : 'none';
     document.getElementById('btn-gen-doc').style.display = students.length ? 'inline-block' : 'none';
+    document.getElementById('btn-excel-upload').style.display = students.length ? 'inline-block' : 'none';
   }
 
   window.downloadCsv = function () {
@@ -595,6 +594,17 @@
     });
     closeDocGenModal();
     alert(`선택된 학생 ${selected.length}명 — 문서 틀(xlsx)이 아직 연결되지 않아 실제 파일 생성은 준비 중입니다.`);
+  };
+
+  window.openExcelUploadModal = function () {
+    document.getElementById('excel-upload-date-label').textContent = docGenSessionLabel || '';
+    document.getElementById('excel-file-input').value = '';
+    document.getElementById('excel-mapping-area').style.display = 'none';
+    document.getElementById('excel-match-area').style.display = 'none';
+    document.getElementById('excel-upload-modal').style.display = 'flex';
+  };
+  window.closeExcelUploadModal = function () {
+    document.getElementById('excel-upload-modal').style.display = 'none';
   };
 
   // ── 학생 정보 엑셀 업로드 ──
@@ -671,14 +681,11 @@
       };
     }).filter(row => row.phone);
 
-    const studentsSnap = await getDocs(query(collection(db, 'students'), where('academyId', '==', ACADEMY_ID)));
     const phoneMap = {};
-    const allStudents = [];
-    studentsSnap.forEach(d => {
-      const s = d.data();
-      allStudents.push({ kakaoId: d.id, name: s.name || '', phone: s.phone || '' });
+    const allStudents = (docGenStudents || []).map(s => ({ kakaoId: s.id, name: s.name || '', phone: s.phone || '' }));
+    allStudents.forEach(s => {
       const p = normalizePhone(s.phone);
-      if (p) phoneMap[p] = { kakaoId: d.id, name: s.name || '' };
+      if (p) phoneMap[p] = { kakaoId: s.kakaoId, name: s.name };
     });
 
     renderMatchArea(parsedRows, phoneMap, allStudents);
@@ -932,7 +939,6 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     <div class="tabs">
       <button class="tab-btn active" id="tab-qr" onclick="showTab('qr')">실시간 QR</button>
       <button class="tab-btn" id="tab-history" onclick="showTab('history')">지난 기록</button>
-      <button class="tab-btn" id="tab-students" onclick="showTab('students')">학생 정보</button>
     </div>
     <button class="btn-logout" onclick="doLogout()">로그아웃</button>
   </div>
@@ -972,6 +978,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
       <div style="flex:1;">
         <button class="btn-csv" id="btn-csv" onclick="downloadCsv()">CSV 다운로드</button>
         <button class="btn-csv" id="btn-gen-doc" onclick="openDocGenModal()" style="display:none;">문서생성</button>
+        <button class="btn-csv" id="btn-excel-upload" onclick="openExcelUploadModal()" style="display:none;">엑셀 업로드</button>
         <div class="hist-detail-card" id="history-detail">
           <div class="hist-empty">왼쪽에서 날짜를 선택하세요.</div>
         </div>
@@ -979,14 +986,19 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     </div>
   </div>
 
-  <div class="page" id="page-students" style="display:none;">
-    <div class="card" style="background:var(--surface);border-radius:20px;padding:28px;box-shadow:var(--shadow);max-width:900px;">
-      <h3 style="font-size:18px;font-weight:800;margin-bottom:6px;">학생 정보 엑셀 업로드</h3>
-      <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">이름/전화번호가 포함된 엑셀 파일을 업로드하면, 전화번호로 기존 학생과 매칭해서 나머지 정보를 저장합니다.</p>
-      <input type="file" id="excel-file-input" accept=".xlsx,.xls" onchange="handleExcelUpload(event)">
-      <div id="excel-mapping-area" style="display:none;margin-top:20px;"></div>
-      <div id="excel-match-area" style="display:none;margin-top:20px;"></div>
+</div>
+
+<div id="excel-upload-modal" class="modal-overlay" style="display:none;">
+  <div class="auth-card modal-card" style="max-width:520px;text-align:left;max-height:80vh;overflow-y:auto;">
+    <div class="auth-logo" style="margin-bottom:16px;">
+      <div class="auth-logo-title">학생 정보 엑셀 업로드</div>
+      <div class="auth-logo-sub" id="excel-upload-date-label"></div>
     </div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">이름/전화번호가 포함된 엑셀 파일을 업로드하면, 전화번호로 이 날짜의 학생과 매칭해서 나머지 정보를 저장합니다.</p>
+    <input type="file" id="excel-file-input" accept=".xlsx,.xls" onchange="handleExcelUpload(event)">
+    <div id="excel-mapping-area" style="display:none;margin-top:20px;"></div>
+    <div id="excel-match-area" style="display:none;margin-top:20px;"></div>
+    <button class="auth-btn" style="background:transparent;border:1.5px solid var(--border);color:var(--muted);margin-top:16px;" onclick="closeExcelUploadModal()">닫기</button>
   </div>
 </div>
 
