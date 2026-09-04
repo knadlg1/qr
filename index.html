@@ -364,6 +364,7 @@
       });
       if (!res.ok) throw new Error('갱신 실패');
       const data = await res.json();
+      if (currentPeriod == null) return; // 응답이 세션 종료 후 도착 — 무시
       drawQr(data.qrPayload);
       countdownSec = 5;
       updateCountdownLabel();
@@ -1026,8 +1027,8 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     <div class="qr-wrap">
       <div class="qr-left">
         <div style="display:flex;align-items:center;gap:10px;">
-          <label class="auth-form-label" style="margin:0;font-size:15px;font-weight:800;">세션 날짜</label>
-          <input type="date" id="session-date" class="auth-input" style="width:auto;margin:0;font-size:22px;font-weight:800;padding:14px 18px;">
+          <label class="auth-form-label" style="margin:0;font-size:17px;font-weight:800;">세션 날짜</label>
+          <input type="date" id="session-date" class="auth-input" style="width:auto;margin:0;font-size:26px;font-weight:800;padding:14px 18px;">
         </div>
         <div class="qr-card">
           <div class="current-period" id="current-period-label">교시 미시작</div>
