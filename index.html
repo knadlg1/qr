@@ -70,6 +70,7 @@
     clearRotateInterval();
     if (rosterUnsub) rosterUnsub();
     if (checkinsUnsub) checkinsUnsub();
+    if (periodCountsUnsub) { periodCountsUnsub(); periodCountsUnsub = null; }
     stopRosterPoll();
     await auth.signOut();
     ACADEMY_ID = null;
@@ -83,6 +84,7 @@
     document.getElementById('topbar-title').textContent = (academyName || '까마귀') + ' QR 출석';
     document.getElementById('session-date').value = todayKST();
     startRosterListener();
+    startPeriodCountsListener();
     startRosterPoll();
     await resumeIfInProgress();
   }
@@ -262,6 +264,7 @@
       const data = await res.json();
       currentPeriod = data.period;
       renderPeriodTabs();
+      renderPeriodCounts();
       document.getElementById('session-date').disabled = true;
       document.getElementById('btn-end-session').style.display = 'inline-block';
       drawQr(data.qrPayload);
@@ -296,6 +299,7 @@
       btn.style.display = 'none';
       renderPeriodTabs();
       updatePanelHeader();
+      renderPeriodCounts();
     } catch (e) {
       alert('세션 종료에 실패했습니다: ' + e.message);
     } finally {
@@ -312,6 +316,7 @@
       if (!data.currentPeriod || data.status === 'closed') return;
       currentPeriod = data.currentPeriod;
       renderPeriodTabs();
+      renderPeriodCounts();
       document.getElementById('session-date').disabled = true;
       document.getElementById('btn-end-session').style.display = 'inline-block';
       const res = await fetch(`${FUNC_URL}/rotateQrToken`, {
@@ -458,10 +463,40 @@
     checkinsUnsub = onSnapshot(q, (snap) => {
       lastCheckinSize = snap.size;
       updatePanelHeader();
+      renderPeriodCounts();
       const list = [];
       snap.forEach(d => list.push(d.data()));
       renderRosterPanel(list);
     });
+  }
+
+  // ── 교시별 출첵 인원 집계 (세션 단위 전체 checkins 구독) ──
+  let periodCountsUnsub = null;
+  let periodCounts = {};
+
+  function startPeriodCountsListener() {
+    const sid = sessionId();
+    if (periodCountsUnsub) periodCountsUnsub();
+    periodCountsUnsub = onSnapshot(collection(db, 'qrSessions', sid, 'checkins'), (snap) => {
+      const counts = {};
+      snap.forEach(d => {
+        const p = d.data().period;
+        if (p != null) counts[p] = (counts[p] || 0) + 1;
+      });
+      periodCounts = counts;
+      renderPeriodCounts();
+    });
+  }
+
+  function renderPeriodCounts() {
+    const el = document.getElementById('period-counts');
+    if (!el) return;
+    if (currentPeriod == null) { el.innerHTML = ''; return; }
+    let html = '';
+    for (let p = 1; p <= currentPeriod; p++) {
+      html += `<span>${p}교시 ${periodCounts[p] || 0}명</span>`;
+    }
+    el.innerHTML = html;
   }
 
   // ── 지난 기록 ──
@@ -1080,6 +1115,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
       </div>
       <div class="roster-panel">
         <div class="roster-panel-header" id="roster-panel-header"><div>오늘 수강생 0명</div><div style="margin-top:6px;font-size:14px;font-weight:600;color:var(--muted);">이번 교시 체크 -</div></div>
+        <div id="period-counts" style="display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:center;font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px;"></div>
         <div class="roster-panel-list" id="roster-panel-list">
           <div class="roster-empty">교시를 시작하면 표시됩니다.</div>
         </div>
