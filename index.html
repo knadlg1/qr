@@ -6,8 +6,7 @@
 <title>Here — QR 출석 관리</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
   import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
@@ -651,99 +650,148 @@
     if (!selected.length) { alert('선택된 학생이 없습니다.'); return; }
     closeDocGenModal();
 
-    let container = null;
-    try {
-      const extraSnaps = await Promise.all(selected.map(s => getDoc(doc(db, 'studentExtraInfo', s.id))));
+    const XLSX_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    function colLetters(c) {
+      let s = '';
+      c = c + 1;
+      while (c > 0) { const m = (c - 1) % 26; s = String.fromCharCode(65 + m) + s; c = Math.floor((c - 1) / 26); }
+      return s;
+    }
+    function cellAddr(r, c) { return colLetters(c) + (r + 1); }
 
+    try {
+      const res = await fetch('./template-연수교육.xlsx');
+      if (!res.ok) throw new Error('템플릿 파일을 불러올 수 없습니다 (' + res.status + ')');
+      const buf = await res.arrayBuffer();
+      const zip = await JSZip.loadAsync(buf);
+      const sheetPath = 'xl/worksheets/sheet1.xml';
+      const sheetFile = zip.file(sheetPath);
+      if (!sheetFile) throw new Error('템플릿 시트를 찾을 수 없습니다.');
+      const xmlText = await sheetFile.async('text');
+      const parser = new DOMParser();
+      const xdoc = parser.parseFromString(xmlText, 'application/xml');
+      const sheetData = xdoc.getElementsByTagNameNS(XLSX_NS, 'sheetData')[0];
+
+      function getCell(r, c) {
+        const a = cellAddr(r, c);
+        const cells = xdoc.getElementsByTagNameNS(XLSX_NS, 'c');
+        for (let i = 0; i < cells.length; i++) {
+          if (cells[i].getAttribute('r') === a) return cells[i];
+        }
+        return null;
+      }
+      function getRow(r) {
+        const rows = xdoc.getElementsByTagNameNS(XLSX_NS, 'row');
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].getAttribute('r') === String(r + 1)) return rows[i];
+        }
+        return null;
+      }
+      function setCellValue(r, c, value) {
+        const cellEl = getCell(r, c);
+        if (!cellEl) return false;
+        Array.from(cellEl.childNodes).forEach(n => cellEl.removeChild(n));
+        cellEl.setAttribute('t', 'inlineStr');
+        const isEl = xdoc.createElementNS(XLSX_NS, 'is');
+        const tEl = xdoc.createElementNS(XLSX_NS, 't');
+        tEl.setAttribute('xml:space', 'preserve');
+        tEl.textContent = String(value ?? '');
+        isEl.appendChild(tEl);
+        cellEl.appendChild(isEl);
+        return true;
+      }
+
+      // 제목(A1) 치환: 원본이 공유 문자열(sharedStrings.xml) 참조이면 원본 텍스트를 읽어와 치환 후 inlineStr로 교체
       const dateStr = String(docGenSessionDate || '');
       const year = /^\d{4}-\d{2}-\d{2}/.test(dateStr) ? dateStr.slice(0, 4) : String(new Date().getFullYear());
+      const a1Cell = getCell(0, 0);
+      if (a1Cell) {
+        let a1Text = '';
+        const a1V = a1Cell.getElementsByTagNameNS(XLSX_NS, 'v')[0];
+        if (a1Cell.getAttribute('t') === 's' && a1V) {
+          const sstFile = zip.file('xl/sharedStrings.xml');
+          if (sstFile) {
+            const sstText = await sstFile.async('text');
+            const sstDoc = parser.parseFromString(sstText, 'application/xml');
+            const sstItems = Array.from(sstDoc.getElementsByTagNameNS(XLSX_NS, 'si')).map(si => si.textContent);
+            const idx = parseInt(a1V.textContent, 10);
+            a1Text = sstItems[idx] || '';
+          }
+        } else if (a1V) {
+          a1Text = a1V.textContent;
+        }
+        const newTitle = a1Text.replace('{{교육년도}}', year + '년').replace('{{교육기관명}}', academyName || '');
+        setCellValue(0, 0, newTitle);
+      }
 
-      // 실측값(template-연수교육.xlsx): 열 너비(px, A~L 12열)
-      const colWidths = [19, 30, 44, 45, 45, 16, 40, 16, 40, 16, 39, 45];
-      const colgroup = '<colgroup>' + colWidths.map(w => `<col style="width:${w}px">`).join('') + '</colgroup>';
+      const extraSnaps = await Promise.all(selected.map(s => getDoc(doc(db, 'studentExtraInfo', s.id))));
 
-      const cellBase = 'border:1px solid #000;text-align:center;vertical-align:middle;overflow:hidden;white-space:normal;word-break:break-all;';
+      // 템플릿에는 학생 15명분 블록(각 3행)이 미리 만들어져 있음. 15명 초과 시 마지막 블록을 복제해서 틀/서식을 그대로 확장
+      const existingBlocks = 15;
+      const totalBlocks = selected.length;
+      if (totalBlocks > existingBlocks) {
+        const lastBlockFirstRow = 3 + 3 * (existingBlocks - 1);
+        const mergeCellsEl = xdoc.getElementsByTagNameNS(XLSX_NS, 'mergeCells')[0];
+        let addedMerges = 0;
+        for (let blockIdx = existingBlocks; blockIdx < totalBlocks; blockIdx++) {
+          const newFirstRow = 3 + 3 * blockIdx;
+          for (let sub = 0; sub < 3; sub++) {
+            const srcRow = getRow(lastBlockFirstRow + sub);
+            if (!srcRow) continue;
+            const clonedRow = srcRow.cloneNode(true);
+            clonedRow.setAttribute('r', String(newFirstRow + sub + 1));
+            Array.from(clonedRow.getElementsByTagNameNS(XLSX_NS, 'c')).forEach(cellEl => {
+              const oldR = cellEl.getAttribute('r');
+              const colPart = oldR.replace(/[0-9]+$/, '');
+              cellEl.setAttribute('r', colPart + (newFirstRow + sub + 1));
+            });
+            sheetData.appendChild(clonedRow);
+          }
+          if (mergeCellsEl) {
+            [0, 1, 2, 3, 4, 11].forEach(c => {
+              const mc = xdoc.createElementNS(XLSX_NS, 'mergeCell');
+              mc.setAttribute('ref', cellAddr(newFirstRow, c) + ':' + cellAddr(newFirstRow + 2, c));
+              mergeCellsEl.appendChild(mc);
+              addedMerges++;
+            });
+          }
+        }
+        if (mergeCellsEl) {
+          mergeCellsEl.setAttribute('count', String(parseInt(mergeCellsEl.getAttribute('count'), 10) + addedMerges));
+        }
+      }
 
-      let bodyRows = '';
       selected.forEach((s, i) => {
-        const extra = extraSnaps[i].exists() ? (extraSnaps[i].data().fields || {}) : {};
-        const times = (docGenCheckinMap && docGenCheckinMap[s.id]) || {};
+        const blockFirstRow = 3 + 3 * i;
+        const extraSnap = extraSnaps[i];
+        const extra = extraSnap.exists() ? (extraSnap.data().fields || {}) : {};
+        setCellValue(blockFirstRow, 0, i + 1);
+        setCellValue(blockFirstRow, 1, s.name || '');
+        setCellValue(blockFirstRow, 2, extra['면허번호'] || '');
+        setCellValue(blockFirstRow, 3, extra['근무처명'] || '');
 
-        for (let sub = 0; sub < 3; sub++) {
-          bodyRows += `<tr style="height:15pt;">`;
-          if (sub === 0) {
-            bodyRows += `<td rowspan="3" style="${cellBase}font-size:10pt;">${i + 1}</td>`;
-            bodyRows += `<td rowspan="3" style="${cellBase}font-size:10pt;">${escapeHtml(s.name || '')}</td>`;
-            bodyRows += `<td rowspan="3" style="${cellBase}font-size:10pt;">${escapeHtml(extra['면허번호'] || '')}</td>`;
-            bodyRows += `<td rowspan="3" style="${cellBase}font-size:10pt;">${escapeHtml(extra['근무처명'] || '')}</td>`;
-            bodyRows += `<td rowspan="3" style="${cellBase}font-size:10pt;"></td>`;
-          }
-          // 교시 1~9: subRow=(p-1)%3, periodCol=5+2*floor((p-1)/3) — 기존 xlsx 버전과 동일한 매핑 논리
-          for (let j = 0; j < 3; j++) {
-            const p = sub + 1 + 3 * j;
-            const t = times[p] || '';
-            bodyRows += `<td style="${cellBase}font-size:10pt;">${p}</td>`;
-            bodyRows += `<td style="${cellBase}font-size:10pt;">${escapeHtml(t)}</td>`;
-          }
-          if (sub === 0) {
-            bodyRows += `<td rowspan="3" style="${cellBase}font-size:10pt;"></td>`;
-          }
-          bodyRows += `</tr>`;
+        const times = (docGenCheckinMap && docGenCheckinMap[s.id]) || {};
+        for (let p = 1; p <= 9; p++) {
+          if (!times[p]) continue;
+          const subRow = (p - 1) % 3;
+          const periodCol = 5 + 2 * Math.floor((p - 1) / 3);
+          setCellValue(blockFirstRow + subRow, periodCol + 1, times[p]);
         }
       });
 
-      const headerCell = `${cellBase}font-size:11pt;font-weight:bold;background:#EFEFEF;`;
-      const subtitleCell = `${cellBase}font-size:11pt;font-weight:bold;`;
+      const serializer = new XMLSerializer();
+      const newXml = serializer.serializeToString(xdoc);
+      zip.file(sheetPath, newXml);
 
-      const tableHtml = `
-        <table style="border-collapse:collapse;table-layout:fixed;width:395px;font-family:Arial,Helvetica,sans-serif;">
-          ${colgroup}
-          <tbody>
-            <tr style="height:52.5pt;">
-              <td colspan="12" style="${cellBase}font-size:24pt;font-weight:bold;">${year}년 ${escapeHtml(academyName || '')} 연수교육 참석자 명단</td>
-            </tr>
-            <tr style="height:31.5pt;">
-              <td colspan="4" style="${subtitleCell}">교육명 :</td>
-              <td colspan="4" style="${subtitleCell}">교육일자 :</td>
-              <td colspan="4" style="${subtitleCell}">승인평점 :</td>
-            </tr>
-            <tr style="height:21pt;">
-              <td style="${headerCell}">No.</td>
-              <td style="${headerCell}">이름</td>
-              <td style="${headerCell}">면허번호</td>
-              <td style="${headerCell}">근무처명</td>
-              <td style="${headerCell}">서명(시작 전)</td>
-              <td colspan="6" style="${headerCell}">QR 체크 기록</td>
-              <td style="${headerCell}">서명(종료 후)</td>
-            </tr>
-            ${bodyRows}
-          </tbody>
-        </table>
-      `;
-
-      container = document.createElement('div');
-      container.style.position = 'fixed';
-      container.style.top = '0';
-      container.style.left = '0';
-      container.style.zIndex = '-1';
-      container.innerHTML = tableHtml;
-      document.body.appendChild(container);
-
-      const { jsPDF } = window.jspdf;
-      const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
-      await pdf.html(container, {
-        callback: (doc) => {
-          doc.save(`${docGenSessionLabel || 'session'}_연수교육_참석자명단.pdf`);
-          container.remove();
-        },
-        html2canvas: { scale: 2 },
-        margin: [20, 20, 20, 20],
-        autoPaging: 'text',
-      });
+      const outBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(outBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${docGenSessionLabel || 'session'}_연수교육_참석자명단.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
     } catch (e) {
       alert('문서 생성 실패: ' + e.message);
-    } finally {
-      if (container && container.parentNode) container.remove();
     }
   };
 
@@ -1155,7 +1203,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
       </div>
       <div style="flex:1;">
         <button class="btn-csv" id="btn-csv" onclick="downloadCsv()">CSV 다운로드</button>
-        <button class="btn-csv" id="btn-gen-doc" onclick="openDocGenModal()" style="display:none;">PDF(제출용)</button>
+        <button class="btn-csv" id="btn-gen-doc" onclick="openDocGenModal()" style="display:none;">엑셀(제출용)</button>
         <button class="btn-csv" id="btn-excel-upload" onclick="openExcelUploadModal()" style="display:none;">엑셀 업로드</button>
         <div class="hist-detail-card" id="history-detail">
           <div class="hist-empty">왼쪽에서 날짜를 선택하세요.</div>
