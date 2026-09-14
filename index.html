@@ -32,6 +32,7 @@
 
   // ── 상태 ──
   let currentPeriod = null;
+  let isFinalPeriod = false; // currentPeriod가 "수업 종료"로 지정된 마지막 교시인지
   let rotateInterval = null;
   let countdownInterval = null;
   let countdownSec = 5;
@@ -83,7 +84,7 @@
   async function enterDashboard() {
     document.getElementById('auth-wrap').style.display = 'none';
     document.getElementById('dashboard').style.display = 'flex';
-    document.getElementById('topbar-title').textContent = (academyName || '까마귀') + (academyInviteCode ? ` (${academyInviteCode})` : '') + ' QR 출석';
+    document.getElementById('topbar-title').textContent = (academyName || '까마귀') + (academyInviteCode ? ` (가입코드 : ${academyInviteCode})` : '');
     document.getElementById('session-date').value = todayKST();
     startRosterListener();
     startPeriodCountsListener();
@@ -253,31 +254,49 @@
     return { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
   }
 
-  window.startNextPeriod = async function () {
-    const btn = document.getElementById('btn-start-period');
+  // final=true면 "수업 종료 QR 및 서명" 버튼 — 새 교시를 시작하면서 동시에 그 교시를
+  // 마지막 교시로 지정한다(startQrPeriod의 final 플래그). 세션 자체는 닫지 않는다 — 즉시
+  // 세션을 닫는 endQrSession 경로와는 별개다. 학생이 이 QR을 찍으면 종료 서명이 강제된다.
+  window.startNextPeriod = async function (final) {
+    if (final && !confirm('오늘 수업을 종료하시겠습니까? 마지막 QR이 표시되고, 학생들은 이 QR을 찍으면 종료 서명을 하게 됩니다.')) return;
+    const btn = document.getElementById(final ? 'btn-end-session' : 'btn-start-period');
     btn.disabled = true;
     try {
       const res = await fetch(`${FUNC_URL}/startQrPeriod`, {
         method: 'POST',
         headers: await authHeader(),
-        body: JSON.stringify({ academyId: ACADEMY_ID, date: document.getElementById('session-date').value })
+        body: JSON.stringify({ academyId: ACADEMY_ID, date: document.getElementById('session-date').value, final: !!final })
       });
       if (!res.ok) throw new Error('요청 실패');
       const data = await res.json();
       currentPeriod = data.period;
+      isFinalPeriod = !!final;
       renderPeriodTabs();
       renderPeriodCounts();
       document.getElementById('session-date').disabled = true;
       document.getElementById('btn-end-session').style.display = 'inline-block';
+      updateEndSessionBtn();
       drawQr(data.qrPayload);
       resubscribeCheckins();
       startRotateLoop();
     } catch (e) {
-      alert('교시 시작에 실패했습니다: ' + e.message);
+      alert((final ? '수업 종료' : '교시 시작') + '에 실패했습니다: ' + e.message);
     } finally {
-      btn.disabled = false;
+      // final 호출이 성공해 isFinalPeriod가 true가 된 경우엔 버튼을 계속 비활성 상태로
+      // 남겨 재클릭(마지막 QR 재발급)을 막는다. 실패했거나 final이 아니면 평소대로 풀어준다.
+      if (!final || !isFinalPeriod) btn.disabled = false;
     }
   };
+
+  // btn-end-session의 disabled/라벨을 isFinalPeriod 값에 맞춰 동기화 — 이미 마지막 교시가
+  // 지정된 상태면 재클릭 방지를 위해 비활성화하고, 이후 추가 교시가 시작돼 더 이상 마지막이
+  // 아니게 되면(정상 "수업시작"으로 이어질 경우) 다시 눌러 재지정할 수 있게 되돌린다.
+  function updateEndSessionBtn() {
+    const btn = document.getElementById('btn-end-session');
+    if (!btn) return;
+    btn.disabled = isFinalPeriod;
+    btn.textContent = isFinalPeriod ? '수업 종료됨' : '수업 종료 QR 및 서명';
+  }
 
   window.endSession = async function () {
     if (!confirm('오늘 세션을 종료하시겠습니까? 종료 후에는 이 세션으로 더 이상 체크인할 수 없습니다.')) return;
@@ -295,6 +314,7 @@
       clearRotateInterval();
       if (checkinsUnsub) { checkinsUnsub(); checkinsUnsub = null; }
       currentPeriod = null;
+      isFinalPeriod = false;
       document.getElementById('qr-canvas').innerHTML = '<span class="qr-placeholder">시작 전</span>';
       document.getElementById('qr-countdown').textContent = '';
       document.getElementById('session-date').disabled = false;
@@ -317,10 +337,12 @@
       const data = snap.data();
       if (!data.currentPeriod || data.status === 'closed') return;
       currentPeriod = data.currentPeriod;
+      isFinalPeriod = data.finalPeriod === data.currentPeriod;
       renderPeriodTabs();
       renderPeriodCounts();
       document.getElementById('session-date').disabled = true;
       document.getElementById('btn-end-session').style.display = 'inline-block';
+      updateEndSessionBtn();
       const res = await fetch(`${FUNC_URL}/rotateQrToken`, {
         method: 'POST',
         headers: await authHeader(),
@@ -377,20 +399,32 @@
     new QRCode(container, { text: payload, width: 440, height: 440, correctLevel: QRCode.CorrectLevel.M });
   }
 
+  // current-period-label에 표시할 "구간 전환" 문구 — 교시 탭이 떠 있는 중에도 라벨을 숨기지
+  // 않고 계속 보여준다. renderPeriodTabs()에서 쓰이고, resumeIfInProgress()도 그 안에서
+  // renderPeriodTabs()를 호출하므로 새로고침 후에도 자동으로 재사용된다.
+  function currentQrLabel(period, isFinal) {
+    if (!period) return '교시 미시작';
+    if (isFinal) {
+      return period === 1 ? '수업시작 전\n수업 종료' : `${period - 1}교시 종료\n수업 종료`;
+    }
+    if (period === 1) return '수업시작 전';
+    return `${period - 1}교시 종료\n${period}교시 시작`;
+  }
+
   function renderPeriodTabs() {
     document.getElementById('btn-start-period').textContent = currentPeriod ? '다음 교시 시작' : '수업시작';
     const tabsEl = document.getElementById('period-tabs');
     const labelEl = document.getElementById('current-period-label');
+    labelEl.style.display = 'block';
+    labelEl.textContent = currentQrLabel(currentPeriod, isFinalPeriod);
     if (!currentPeriod) {
       tabsEl.innerHTML = '';
-      labelEl.style.display = 'block';
-      labelEl.textContent = '교시 미시작';
       return;
     }
-    labelEl.style.display = 'none';
     let html = '';
     for (let i = 1; i <= currentPeriod; i++) {
-      html += `<div class="period-tab${i === currentPeriod ? ' active' : ''}">${i}교시</div>`;
+      const finalBadge = (isFinalPeriod && i === currentPeriod) ? ' 🏁마지막' : '';
+      html += `<div class="period-tab${i === currentPeriod ? ' active' : ''}">${i}교시${finalBadge}</div>`;
     }
     tabsEl.innerHTML = html;
   }
@@ -1043,7 +1077,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
 #qr-canvas{border-radius:12px;min-width:440px;min-height:440px;display:flex;align-items:center;justify-content:center;}
 .qr-placeholder{font-size:20px;font-weight:700;color:var(--muted);}
 .qr-countdown{font-size:15px;font-weight:700;color:var(--brand);}
-.current-period{font-size:20px;font-weight:800;color:var(--text);}
+.current-period{font-size:20px;font-weight:800;color:var(--text);white-space:pre-line;}
 .btn-primary{background:var(--brand);color:#fff;border:none;padding:14px 32px;border-radius:var(--pill);font-size:15px;font-weight:700;cursor:pointer;transition:.15s;}
 .btn-primary:hover{background:var(--brand-dark);}
 .btn-primary:disabled{opacity:.5;cursor:not-allowed;}
@@ -1191,7 +1225,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
           <div class="qr-countdown" id="qr-countdown"></div>
         </div>
         <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">수업시작</button>
-        <button class="btn-logout" id="btn-end-session" onclick="endSession()" style="display:none;">세션 종료</button>
+        <button class="btn-primary" id="btn-end-session" onclick="startNextPeriod(true)" style="display:none;">수업 종료 QR 및 서명</button>
       </div>
       <div class="roster-panel">
         <div class="roster-panel-header" id="roster-panel-header"><div>오늘 수강생 0명</div><div style="margin-top:6px;font-size:14px;font-weight:600;color:var(--muted);">이번 교시 체크 -</div></div>
