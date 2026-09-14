@@ -15,6 +15,7 @@
   // 로그인한 계정(uid)의 qrAdmins 문서에서 academyId를 조회해 채운다(doLogin 참고).
   let ACADEMY_ID = null;
   let academyName = '';
+  let academyInviteCode = '';
 
   const FUNC_URL = 'https://us-central1-my-attendance-8122d.cloudfunctions.net';
 
@@ -82,7 +83,7 @@
   async function enterDashboard() {
     document.getElementById('auth-wrap').style.display = 'none';
     document.getElementById('dashboard').style.display = 'flex';
-    document.getElementById('topbar-title').textContent = (academyName || '까마귀') + ' QR 출석';
+    document.getElementById('topbar-title').textContent = (academyName || '까마귀') + (academyInviteCode ? ` (${academyInviteCode})` : '') + ' QR 출석';
     document.getElementById('session-date').value = todayKST();
     startRosterListener();
     startPeriodCountsListener();
@@ -970,6 +971,12 @@
       }
       ACADEMY_ID = adminSnap.data().academyId;
       academyName = adminSnap.data().academyName || '';
+      try {
+        const academySnap = await getDoc(doc(db, 'academies', ACADEMY_ID));
+        academyInviteCode = academySnap.exists() ? (academySnap.data().inviteCode || '') : '';
+      } catch (e) {
+        academyInviteCode = '';
+      }
       await enterDashboard();
     } catch (e) {
       console.warn('로그인 상태 확인 실패:', e);
