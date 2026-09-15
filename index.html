@@ -796,6 +796,15 @@
         }
       }
 
+      // 서명 이미지 삽입 준비 — startSignature/endSignature(base64 PNG, data: 접두사 없음)가
+      // 있는 학생만 해당 블록의 서명(시작 전)/서명(종료 후) 병합 셀(E열=4/L열=11, 0-based)에
+      // 이미지로 넣는다. 템플릿의 drawing1.xml은 빈 골격만 있어([Content_Types].xml에 png
+      // 미등록, drawing1.xml.rels도 없음) 실제 앵커/관계/미디어는 여기서 새로 만들어 채운다.
+      const SIG_COLS = { start: 4, end: 11 };
+      let imgCounter = 0;
+      let anchorXml = '';
+      const relEntries = [];
+
       selected.forEach((s, i) => {
         const blockFirstRow = 3 + 3 * i;
         const extraSnap = extraSnaps[i];
@@ -812,7 +821,53 @@
           const periodCol = 5 + 2 * Math.floor((p - 1) / 3);
           setCellValue(blockFirstRow + subRow, periodCol + 1, times[p]);
         }
+
+        ['start', 'end'].forEach(kind => {
+          const sig = kind === 'start' ? s.startSignature : s.endSignature;
+          if (!sig) return; // 아직 서명 안 함 — 빈 칸 유지
+          imgCounter++;
+          const rId = `rId${imgCounter}`;
+          zip.file(`xl/media/image${imgCounter}.png`, sig, { base64: true });
+          relEntries.push(`<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image${imgCounter}.png"/>`);
+          const fromCol = SIG_COLS[kind];
+          anchorXml += `<xdr:twoCellAnchor>` +
+            `<xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${blockFirstRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+            `<xdr:to><xdr:col>${fromCol + 1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${blockFirstRow + 3}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+            `<xdr:pic>` +
+              `<xdr:nvPicPr>` +
+                `<xdr:cNvPr id="${imgCounter}" name="Signature${imgCounter}"/>` +
+                `<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>` +
+              `</xdr:nvPicPr>` +
+              `<xdr:blipFill><a:blip r:embed="${rId}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>` +
+              `<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>` +
+            `</xdr:pic>` +
+            `<xdr:clientData/>` +
+          `</xdr:twoCellAnchor>`;
+        });
       });
+
+      if (imgCounter > 0) {
+        // [Content_Types].xml에 png 확장자 등록(없으면)
+        const ctPath = '[Content_Types].xml';
+        let ctXml = await zip.file(ctPath).async('text');
+        if (!/Extension="png"/.test(ctXml)) {
+          ctXml = ctXml.replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>');
+          zip.file(ctPath, ctXml);
+        }
+
+        // drawing1.xml — 빈 <xdr:wsDr .../> 자기닫힘 태그를 앵커들을 담은 여닫힘 태그로 교체
+        const drawingPath = 'xl/drawings/drawing1.xml';
+        let drawingXml = await zip.file(drawingPath).async('text');
+        drawingXml = drawingXml.replace(/\/>\s*$/, '>' + anchorXml + '</xdr:wsDr>');
+        zip.file(drawingPath, drawingXml);
+
+        // drawing1.xml.rels — 템플릿에 없던 파일이라 새로 생성
+        const relsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          relEntries.join('') +
+          '</Relationships>';
+        zip.file('xl/drawings/_rels/drawing1.xml.rels', relsXml);
+      }
 
       const serializer = new XMLSerializer();
       const newXml = serializer.serializeToString(xdoc);
