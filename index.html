@@ -42,6 +42,7 @@
   let rosterUnsub = null;
   let checkinsUnsub = null;
   let sessionUnsub = null; // 세션 문서 자체 구독 — 다른 컴퓨터에서 교시를 바꾸면 실시간 반영
+  let makeupRequestsUnsub = null; // 출석 구제 요청 목록 구독
 
   function todayKST() {
     return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
@@ -79,6 +80,7 @@
     if (checkinsUnsub) checkinsUnsub();
     if (periodCountsUnsub) { periodCountsUnsub(); periodCountsUnsub = null; }
     if (sessionUnsub) { sessionUnsub(); sessionUnsub = null; }
+    if (makeupRequestsUnsub) { makeupRequestsUnsub(); makeupRequestsUnsub = null; }
     stopRosterPoll();
     await auth.signOut();
     ACADEMY_ID = null;
@@ -94,6 +96,7 @@
     startRosterListener();
     startPeriodCountsListener();
     startRosterPoll();
+    loadAllAcademyStudents(); // 출석 구제 요청용 학생 선택 목록 — 로그인당 1회면 충분
     await resumeIfInProgress();
   }
 
@@ -285,6 +288,7 @@
       drawQr(data.qrPayload);
       resubscribeCheckins();
       startSessionListener();
+      startMakeupRequestsListener();
       startRotateLoop();
     } catch (e) {
       alert((final ? '수업 종료' : '교시 시작') + '에 실패했습니다: ' + e.message);
@@ -361,6 +365,7 @@
       clearRotateInterval();
       if (checkinsUnsub) { checkinsUnsub(); checkinsUnsub = null; }
       if (sessionUnsub) { sessionUnsub(); sessionUnsub = null; }
+      if (makeupRequestsUnsub) { makeupRequestsUnsub(); makeupRequestsUnsub = null; }
       currentPeriod = null;
       maxPeriod = 0;
       isFinalPeriod = false;
@@ -404,6 +409,7 @@
       drawQr(rdata.qrPayload);
       resubscribeCheckins();
       startSessionListener();
+      startMakeupRequestsListener();
       startRotateLoop();
     } catch (e) {
       console.warn('이어받기 실패:', e);
@@ -429,6 +435,80 @@
       drawQr(JSON.stringify({ a: ACADEMY_ID, s: sid, p: data.currentPeriod, t: data.periodToken }));
     });
   }
+
+  // ── 출석 구제 요청 ──
+  let makeupAllStudents = [];
+
+  // "출석 구제 요청" 패널의 학생 선택 <select>를 채우기 위한 학원 전체 학생 목록.
+  // orderBy 없는 단순 where 쿼리라 별도 색인 불필요. 로그인(enterDashboard)당 1회면 충분.
+  async function loadAllAcademyStudents() {
+    try {
+      const snap = await getDocs(query(collection(db, 'students'), where('academyId', '==', ACADEMY_ID)));
+      makeupAllStudents = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const sel = document.getElementById('makeup-student-select');
+      if (!sel) return;
+      const options = makeupAllStudents.map(s =>
+        `<option value="${s.id}">${escapeHtml(s.name || s.id)} (${escapeHtml(String(s.phone || '').slice(-4))})</option>`
+      ).join('');
+      sel.innerHTML = '<option value="">학생 선택</option>' + options;
+    } catch (e) {
+      console.warn('학생 목록 조회 실패:', e);
+    }
+  }
+
+  window.sendMakeupRequest = async function () {
+    const kakaoId = document.getElementById('makeup-student-select').value;
+    const period = parseInt(document.getElementById('makeup-period-input').value, 10);
+    if (!kakaoId || !period || period < 1) { alert('학생과 교시를 선택해주세요.'); return; }
+    const student = makeupAllStudents.find(s => s.id === kakaoId);
+    const sid = sessionId();
+    try {
+      await setDoc(doc(db, 'qrSessions', sid, 'makeupRequests', `${kakaoId}_${period}`), {
+        kakaoId, name: student ? student.name || '' : '', phone: student ? student.phone || '' : '',
+        period, status: 'pending', requestedAt: serverTimestamp(),
+        signature: null, submittedAt: null, approvedAt: null, rejectedAt: null,
+      }, { merge: true });
+      alert('요청을 보냈습니다.');
+    } catch (e) { alert('요청 실패: ' + e.message); }
+  };
+
+  const MAKEUP_STATUS_LABEL = { pending: '대기중(미제출)', submitted: '제출됨 — 검토 필요', approved: '승인됨', rejected: '거부됨' };
+
+  function renderMakeupRequestsList(list) {
+    const el = document.getElementById('makeup-requests-list');
+    if (!el) return;
+    if (!list.length) { el.innerHTML = '<div class="hist-empty">요청 내역이 없습니다.</div>'; return; }
+    el.innerHTML = list.map(r => `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">
+        <span style="flex:1;font-size:13px;">${escapeHtml(r.name || r.kakaoId)} · ${r.period}교시 · ${MAKEUP_STATUS_LABEL[r.status] || r.status}</span>
+        ${r.status === 'submitted' ? `
+          <button class="btn-primary" style="padding:6px 16px;font-size:12px;" onclick="reviewMakeupRequest('${r.kakaoId}', ${r.period}, 'approve')">승인</button>
+          <button class="btn-primary" style="padding:6px 16px;font-size:12px;background:#B91C1C;" onclick="reviewMakeupRequest('${r.kakaoId}', ${r.period}, 'reject')">거부</button>
+        ` : ''}
+      </div>
+    `).join('');
+  }
+
+  function startMakeupRequestsListener() {
+    if (makeupRequestsUnsub) { makeupRequestsUnsub(); makeupRequestsUnsub = null; }
+    const sid = sessionId();
+    makeupRequestsUnsub = onSnapshot(collection(db, 'qrSessions', sid, 'makeupRequests'), (snap) => {
+      const list = [];
+      snap.forEach(d => list.push({ id: d.id, ...d.data() }));
+      renderMakeupRequestsList(list);
+    });
+  }
+
+  window.reviewMakeupRequest = async function (kakaoId, period, action) {
+    try {
+      const res = await fetch(`${FUNC_URL}/reviewMakeupRequest`, {
+        method: 'POST', headers: await authHeader(),
+        body: JSON.stringify({ sessionId: sessionId(), kakaoId, period, action })
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message); return; }
+    } catch (e) { alert('처리 실패: ' + e.message); }
+  };
 
   function startRotateLoop() {
     clearRotateInterval();
@@ -685,6 +765,7 @@
       } else if (c.checkedAt) {
         timeStr = String(c.checkedAt);
       }
+      if (c.makeupApproved) timeStr = timeStr + ' (구제)';
       checkinMap[sid2][c.period] = timeStr;
     });
     docGenCheckinMap = checkinMap;
@@ -1386,6 +1467,20 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
         <div class="roster-panel-list" id="roster-panel-list">
           <div class="roster-empty">교시를 시작하면 표시됩니다.</div>
         </div>
+      </div>
+    </div>
+
+    <div class="hist-detail-card" style="max-width:900px;margin:24px auto 0;">
+      <div style="font-size:18px;font-weight:800;color:var(--brand);margin-bottom:14px;">출석 구제 요청</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+        <select class="auth-input" id="makeup-student-select" style="margin:0;width:auto;flex:1;min-width:200px;">
+          <option value="">학생 선택</option>
+        </select>
+        <input type="number" min="1" id="makeup-period-input" class="auth-input" placeholder="교시" style="margin:0;width:90px;">
+        <button class="btn-primary" onclick="sendMakeupRequest()">요청 보내기</button>
+      </div>
+      <div id="makeup-requests-list">
+        <div class="hist-empty">요청 내역이 없습니다.</div>
       </div>
     </div>
   </div>
