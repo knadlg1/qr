@@ -32,12 +32,16 @@
 
   // ── 상태 ──
   let currentPeriod = null;
+  // 지금까지 도달한 최고 교시 — "◀ 이전 교시"로 되돌아갔다가 다시 앞으로 이동할 수 있는
+  // 범위(switchQrPeriod). CF가 세션 문서에 저장하는 maxPeriod와 항상 동기화된다.
+  let maxPeriod = 0;
   let isFinalPeriod = false; // currentPeriod가 "수업 종료"로 지정된 마지막 교시인지
   let rotateInterval = null;
   let countdownInterval = null;
   let countdownSec = 5;
   let rosterUnsub = null;
   let checkinsUnsub = null;
+  let sessionUnsub = null; // 세션 문서 자체 구독 — 다른 컴퓨터에서 교시를 바꾸면 실시간 반영
 
   function todayKST() {
     return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
@@ -74,6 +78,7 @@
     if (rosterUnsub) rosterUnsub();
     if (checkinsUnsub) checkinsUnsub();
     if (periodCountsUnsub) { periodCountsUnsub(); periodCountsUnsub = null; }
+    if (sessionUnsub) { sessionUnsub(); sessionUnsub = null; }
     stopRosterPoll();
     await auth.signOut();
     ACADEMY_ID = null;
@@ -270,6 +275,7 @@
       if (!res.ok) throw new Error('요청 실패');
       const data = await res.json();
       currentPeriod = data.period;
+      maxPeriod = data.maxPeriod || data.period;
       isFinalPeriod = !!final;
       renderPeriodTabs();
       renderPeriodCounts();
@@ -278,6 +284,7 @@
       updateEndSessionBtn();
       drawQr(data.qrPayload);
       resubscribeCheckins();
+      startSessionListener();
       startRotateLoop();
     } catch (e) {
       alert((final ? '수업 종료' : '교시 시작') + '에 실패했습니다: ' + e.message);
@@ -285,6 +292,46 @@
       // final 호출이 성공해 isFinalPeriod가 true가 된 경우엔 버튼을 계속 비활성 상태로
       // 남겨 재클릭(마지막 QR 재발급)을 막는다. 실패했거나 final이 아니면 평소대로 풀어준다.
       if (!final || !isFinalPeriod) btn.disabled = false;
+    }
+  };
+
+  // "다음 교시 시작" 버튼의 실제 클릭 핸들러 — 이미 만들어진 교시 범위 안(currentPeriod <
+  // maxPeriod, 즉 이전 교시로 되돌아가 있는 중)이면 새로 만들지 않고 기존 다음 교시로
+  // 이동만 시키고(switchQrPeriod), 그게 아니면(맨 앞선 교시에 있을 때) 진짜 새 교시를
+  // 만드는 기존 startNextPeriod로 보낸다.
+  window.handleNextPeriodClick = function () {
+    // module 스코프 안에서는 window.foo = ... 로 붙인 함수가 bare 식별자로 안 보이니
+    // (onclick="..." 인라인 핸들러와 달리 여긴 모듈 내부 코드) window. 접두어로 호출한다.
+    if (currentPeriod && currentPeriod < maxPeriod) {
+      window.switchToPeriod('next');
+    } else {
+      window.startNextPeriod();
+    }
+  };
+
+  // "◀ 이전 교시" 버튼 — 이미 만들어진 교시 범위 안에서만 currentPeriod를 이동시킨다(새
+  // 교시를 만들지 않음). startNextPeriod가 성공 시 하던 일(탭/카운트/QR/구독/롤링 재개)과
+  // 동일하게 갱신한다.
+  window.switchToPeriod = async function (direction) {
+    try {
+      const res = await fetch(`${FUNC_URL}/switchQrPeriod`, {
+        method: 'POST',
+        headers: await authHeader(),
+        body: JSON.stringify({ date: document.getElementById('session-date').value, direction })
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message); return; }
+      currentPeriod = data.period;
+      maxPeriod = data.maxPeriod || data.period;
+      isFinalPeriod = !!data.isFinalPeriod;
+      renderPeriodTabs();
+      renderPeriodCounts();
+      updateEndSessionBtn();
+      drawQr(data.qrPayload);
+      resubscribeCheckins();
+      startRotateLoop();
+    } catch (e) {
+      alert('교시 이동에 실패했습니다: ' + e.message);
     }
   };
 
@@ -313,7 +360,9 @@
 
       clearRotateInterval();
       if (checkinsUnsub) { checkinsUnsub(); checkinsUnsub = null; }
+      if (sessionUnsub) { sessionUnsub(); sessionUnsub = null; }
       currentPeriod = null;
+      maxPeriod = 0;
       isFinalPeriod = false;
       document.getElementById('qr-canvas').innerHTML = '<span class="qr-placeholder">시작 전</span>';
       document.getElementById('qr-countdown').textContent = '';
@@ -337,6 +386,7 @@
       const data = snap.data();
       if (!data.currentPeriod || data.status === 'closed') return;
       currentPeriod = data.currentPeriod;
+      maxPeriod = data.maxPeriod || data.currentPeriod;
       isFinalPeriod = data.finalPeriod === data.currentPeriod;
       renderPeriodTabs();
       renderPeriodCounts();
@@ -353,10 +403,31 @@
       if (!rdata.success) return;
       drawQr(rdata.qrPayload);
       resubscribeCheckins();
+      startSessionListener();
       startRotateLoop();
     } catch (e) {
       console.warn('이어받기 실패:', e);
     }
+  }
+
+  // 세션 문서 자체를 구독 — 다른 컴퓨터에서 교시를 바꾸면(switchQrPeriod/startNextPeriod)
+  // 이 리스너가 즉시 반영한다. 이 컴퓨터 자신의 액션으로 인한 에코든 다른 컴퓨터發 변경이든
+  // 구분하지 않고 항상 최신 상태로 그린다(단순하게).
+  function startSessionListener() {
+    if (sessionUnsub) { sessionUnsub(); sessionUnsub = null; }
+    const sid = sessionId();
+    sessionUnsub = onSnapshot(doc(db, 'qrSessions', sid), (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (!data.currentPeriod) return;
+      currentPeriod = data.currentPeriod;
+      maxPeriod = data.maxPeriod || data.currentPeriod;
+      isFinalPeriod = data.finalPeriod === data.currentPeriod;
+      renderPeriodTabs();
+      renderPeriodCounts();
+      updateEndSessionBtn();
+      drawQr(JSON.stringify({ a: ACADEMY_ID, s: sid, p: data.currentPeriod, t: data.periodToken }));
+    });
   }
 
   function startRotateLoop() {
@@ -417,6 +488,7 @@
     const labelEl = document.getElementById('current-period-label');
     labelEl.style.display = 'block';
     labelEl.textContent = currentQrLabel(currentPeriod, isFinalPeriod);
+    updatePrevNextButtons();
     if (!currentPeriod) {
       tabsEl.innerHTML = '';
       return;
@@ -427,6 +499,13 @@
       html += `<div class="period-tab${i === currentPeriod ? ' active' : ''}">${i}교시${finalBadge}</div>`;
     }
     tabsEl.innerHTML = html;
+  }
+
+  // "◀ 이전 교시" 버튼 활성/비활성 — 1교시(또는 미시작)면 더 되돌아갈 곳이 없으니 비활성화.
+  function updatePrevNextButtons() {
+    const prevBtn = document.getElementById('btn-prev-period');
+    if (!prevBtn) return;
+    prevBtn.disabled = !currentPeriod || currentPeriod <= 1;
   }
 
   function startRosterListener() {
@@ -899,8 +978,11 @@
   // ── 학생 정보 엑셀 업로드 ──
   let excelRawRows = []; // 헤더 제외 데이터 행들, 2차원 배열
   let excelHeaders = [];
-  let pendingMatched = [];   // [{ kakaoId, extra }]
+  let pendingMatched = [];   // [{ kakaoId, extra, phone }]
   let pendingUnmatched = []; // [{ name, phone, extra }]
+  // renderMatchArea에 마지막으로 넘어온 parsedRows 전체(매칭 여부 무관) — saveExcelMatches가
+  // studentExtraPreload 백필용으로 접근할 수 있게 모듈 스코프에 보관해둔다.
+  let lastParsedRows = [];
 
   window.handleExcelUpload = function (event) {
     const file = event.target.files[0];
@@ -984,11 +1066,12 @@
     const area = document.getElementById('excel-match-area');
     area.style.display = 'block';
 
+    lastParsedRows = parsedRows;
     pendingMatched = [];
     pendingUnmatched = [];
     parsedRows.forEach(row => {
       const hit = phoneMap[row.phone];
-      if (hit) pendingMatched.push({ kakaoId: hit.kakaoId, extra: row.extra });
+      if (hit) pendingMatched.push({ kakaoId: hit.kakaoId, extra: row.extra, phone: row.phone });
       else pendingUnmatched.push(row);
     });
 
@@ -1029,12 +1112,26 @@
           fields: row.extra,
         }, { merge: true });
       }
-      alert(`${rowsToSave.length}명의 정보를 저장했습니다.`);
+      // 업로드된 행 전체(매칭됐든 안 됐든)를 전화번호 기준으로 미리 저장해둔다 — 아직
+      // 가입 전인 학생이 나중에 가입하면 mobile-app의 matchStudentExtraPreload가 이 문서를
+      // 찾아 studentExtraInfo로 자동 복사한다.
+      for (const row of lastParsedRows) {
+        if (!row.phone) continue;
+        await setDoc(doc(db, 'studentExtraPreload', `${ACADEMY_ID}_${normalizePhone(row.phone)}`), {
+          academyId: ACADEMY_ID,
+          phone: row.phone,
+          name: row.name || '',
+          extra: row.extra,
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+      }
+      alert(`${rowsToSave.length}명의 정보를 저장했습니다.\n(가입 전 학생은 가입 시 자동 매칭됩니다)`);
       document.getElementById('excel-mapping-area').style.display = 'none';
       document.getElementById('excel-match-area').style.display = 'none';
       document.getElementById('excel-file-input').value = '';
       pendingMatched = [];
       pendingUnmatched = [];
+      lastParsedRows = [];
     } catch (e) {
       alert('저장 실패: ' + e.message);
     }
@@ -1279,7 +1376,8 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
           </div>
           <div class="qr-countdown" id="qr-countdown"></div>
         </div>
-        <button class="btn-primary" id="btn-start-period" onclick="startNextPeriod()">수업시작</button>
+        <button class="btn-primary" id="btn-prev-period" onclick="switchToPeriod('prev')" disabled>◀ 이전 교시</button>
+        <button class="btn-primary" id="btn-start-period" onclick="handleNextPeriodClick()">수업시작</button>
         <button class="btn-primary" id="btn-end-session" onclick="startNextPeriod(true)" style="display:none;">수업 종료 QR 및 서명</button>
       </div>
       <div class="roster-panel">
