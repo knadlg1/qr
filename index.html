@@ -765,7 +765,7 @@
       } else if (c.checkedAt) {
         timeStr = String(c.checkedAt);
       }
-      if (c.makeupApproved) timeStr = timeStr + ' (구제)';
+      if (c.makeupApproved) timeStr = timeStr + ' (서명출석)';
       checkinMap[sid2][c.period] = timeStr;
     });
     docGenCheckinMap = checkinMap;
@@ -1471,7 +1471,7 @@ body{font-family:'Pretendard',system-ui,sans-serif;background:var(--canvas);colo
     </div>
 
     <div class="hist-detail-card" style="max-width:900px;margin:24px auto 0;">
-      <div style="font-size:18px;font-weight:800;color:var(--brand);margin-bottom:14px;">출석 구제 요청</div>
+      <div style="font-size:18px;font-weight:800;color:var(--brand);margin-bottom:14px;">출석 서명요청</div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
         <select class="auth-input" id="makeup-student-select" style="margin:0;width:auto;flex:1;min-width:200px;">
           <option value="">학생 선택</option>
